@@ -1,0 +1,12 @@
+fastapi==0.111.0
+uvicorn==0.30.1
+python-multipart==0.0.9
+numpy
+scipy
+librosa
+soundfile
+mido
+torch
+torchvision
+piano-transcription-inference
+music21==9.1.0
