@@ -44,6 +44,7 @@ export default function App() {
   const [taskProgress, setTaskProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [audioDuration, setAudioDuration] = useState(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isRequantizing, setIsRequantizing] = useState(false);
   
@@ -212,6 +213,9 @@ export default function App() {
           }
           if (data.allow_triplets !== undefined) {
             setAllowTriplets(data.allow_triplets);
+          }
+          if (data.audio_duration) {
+            setAudioDuration(data.audio_duration);
           }
           triggerConfetti();
           setTimeout(() => {
@@ -678,8 +682,8 @@ export default function App() {
                 // Past systems: fully reveal notes
                 canvasCtx.rect(0, top, 99999, height);
               } else if (i === activeSystemIdx) {
-                // Current system: reveal up to playheadX + 4
-                canvasCtx.rect(0, top, playheadX + 4, height);
+                // Current system: reveal up to playheadX + 60 to cover beams & flags fully without clipping
+                canvasCtx.rect(0, top, playheadX + 60, height);
               }
               // Future systems: stay hidden
             }
@@ -695,8 +699,11 @@ export default function App() {
         }
         
         // Stop check
+        const isPastAudioDuration = audioDuration && (elapsedSec >= audioDuration);
         const lastBeat = notes[notes.length - 1]?.onset_beat || 0;
-        if (elapsedBeats > lastBeat + 2.0) {
+        const isPastLastBeat = elapsedBeats > lastBeat + 2.0;
+        
+        if (isPastAudioDuration || (!audioDuration && isPastLastBeat)) {
           stopPlayback();
           return;
         }
@@ -932,6 +939,7 @@ export default function App() {
       if (data.min_duration_ms !== undefined) setMinDuration(data.min_duration_ms);
       if (data.filter_slips !== undefined) setFilterSlips(data.filter_slips);
       if (data.allow_triplets !== undefined) setAllowTriplets(data.allow_triplets);
+      if (data.audio_duration) setAudioDuration(data.audio_duration);
 
       stopPlayback();
       notesDataRef.current = null;

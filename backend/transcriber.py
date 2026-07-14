@@ -341,6 +341,59 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
             
     score.insert(0, right_hand)
     score.insert(0, left_hand)
+    
+    # Post-process parts to remove polyphonic overlaps and excessive rests
+    def remove_polyphonic_overlaps(part):
+        from music21 import note, chord
+        import copy
+        
+        elements_by_offset = {}
+        for el in list(part.recurse()):
+            if isinstance(el, (note.Note, chord.Chord)):
+                elements_by_offset.setdefault(el.offset, []).append(el)
+                part.remove(el)
+                
+        if not elements_by_offset:
+            return
+            
+        sorted_offsets = sorted(elements_by_offset.keys())
+        for idx, offset in enumerate(sorted_offsets):
+            group = elements_by_offset[offset]
+            pitches = []
+            duration = None
+            
+            for el in group:
+                if isinstance(el, note.Note):
+                    pitches.append(el.pitch)
+                    if duration is None or el.duration.quarterLength > duration.quarterLength:
+                        duration = el.duration
+                elif isinstance(el, chord.Chord):
+                    pitches.extend(el.pitches)
+                    if duration is None or el.duration.quarterLength > duration.quarterLength:
+                        duration = el.duration
+                        
+            unique_pitches = list(set(pitches))
+            if not unique_pitches:
+                continue
+                
+            if len(unique_pitches) == 1:
+                new_el = note.Note(unique_pitches[0])
+            else:
+                new_el = chord.Chord(unique_pitches)
+                
+            new_el.duration = copy.deepcopy(duration)
+            
+            if idx < len(sorted_offsets) - 1:
+                next_offset = sorted_offsets[idx+1]
+                gap = next_offset - offset
+                if gap > 0 and new_el.quarterLength > gap:
+                    new_el.quarterLength = gap
+                    
+            part.insert(offset, new_el)
+
+    remove_polyphonic_overlaps(right_hand)
+    remove_polyphonic_overlaps(left_hand)
+    
     return score
 
 def post_process_and_save_midi(
@@ -434,6 +487,7 @@ def transcribe_audio_to_raw_midi(
     # Load audio
     print(f"Loading audio from {audio_path}...")
     audio, _ = load_audio(audio_path, sr=sample_rate, mono=True)
+    audio_duration = float(len(audio)) / sample_rate
     
     # Run transcription
     print("Running ByteDance Onsets & Frames transcription...")
@@ -473,7 +527,7 @@ def transcribe_audio_to_raw_midi(
         time_signature=final_meter
     )
     
-    return confidence_threshold, min_duration_ms, final_bpm, final_meter
+    return confidence_threshold, min_duration_ms, final_bpm, final_meter, audio_duration
 
 def quantize_and_export(
     raw_midi_path: str,

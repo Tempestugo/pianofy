@@ -66,7 +66,7 @@ def run_transcription_task(
         output_midi_path = os.path.join(OUTPUTS_DIR, f"{task_id}.mid")
         
         # Step 1: Heavy Neural Network Inference with Auto-BPM/Meter & Activation Saving
-        opt_conf, opt_min_dur, resolved_bpm, resolved_meter = transcribe_audio_to_raw_midi(
+        opt_conf, opt_min_dur, resolved_bpm, resolved_meter, audio_duration = transcribe_audio_to_raw_midi(
             audio_path=audio_path,
             raw_midi_path=raw_midi_path,
             output_dict_path=output_dict_path,
@@ -105,6 +105,7 @@ def run_transcription_task(
         TASKS[task_id]["split_point"] = split_point
         TASKS[task_id]["filter_slips"] = filter_slips
         TASKS[task_id]["allow_triplets"] = allow_triplets
+        TASKS[task_id]["audio_duration"] = audio_duration
         
     except Exception as e:
         print(f"Error executing task {task_id}: {e}")
@@ -265,6 +266,12 @@ async def get_task_notes(task_id: str):
         xml_path = os.path.join(OUTPUTS_DIR, f"{task_id}.musicxml")
         mid_path = os.path.join(OUTPUTS_DIR, f"{task_id}.mid")
         if os.path.exists(xml_path) and os.path.exists(mid_path):
+            import mido
+            try:
+                mid = mido.MidiFile(mid_path)
+                dur = mid.length
+            except Exception:
+                dur = 30.0
             TASKS[task_id] = {
                 "status": "SUCCESS",
                 "progress": 100,
@@ -276,7 +283,8 @@ async def get_task_notes(task_id: str):
                 "confidence_threshold": 0.45,
                 "min_duration_ms": 30.0,
                 "filter_slips": True,
-                "allow_triplets": False
+                "allow_triplets": False,
+                "audio_duration": dur
             }
         else:
             raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
