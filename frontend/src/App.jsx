@@ -63,7 +63,10 @@ export default function App() {
   const playbackAnimFrameRef = useRef(null);
   const notesDataRef = useRef(null);
   const playheadMapRef = useRef([]);
+  const systemsRef = useRef([]);
   const vfElementsRef = useRef([]);
+  const lastDrawnFrameIdRef = useRef(0);
+  const lastScheduledFrameIdRef = useRef(0);
   
   // Playhead style state for exact height sizing
   const [playheadStyle, setPlayheadStyle] = useState({ top: '0px', height: '100%' });
@@ -416,7 +419,7 @@ export default function App() {
         let safety = 0;
         while (!cursor.iterator.endReached && safety < 1500) {
           safety++;
-          const beat = cursor.iterator.currentTimeStamp.RealValue;
+          const beat = cursor.iterator.currentTimeStamp.RealValue * 4;
           const cursorEl = cursor.cursorElement;
           
           let relativeX = 0;
@@ -426,12 +429,14 @@ export default function App() {
             const rect = cursorEl.getBoundingClientRect();
             relativeX = rect.left - containerRect.left + container.scrollLeft;
             relativeY = rect.top - containerRect.top + container.scrollTop;
+            const cursorHeight = rect.height || 150; // Fallback to 150 to cover both staves
+            playheadMap.push({ beat, x: relativeX, y: relativeY, height: cursorHeight });
           } else {
             // Safe linear estimate: 200 pixels per beat
             relativeX = (beat * 200) + 120;
+            playheadMap.push({ beat, x: relativeX, y: 100, height: 150 });
           }
           
-          playheadMap.push({ beat, x: relativeX, y: relativeY });
           cursor.next();
         }
         cursor.reset();
@@ -439,6 +444,30 @@ export default function App() {
         
         playheadMapRef.current = playheadMap;
         console.log("Playhead Map calculated successfully:", playheadMap.slice(0, 10));
+        
+        // Segment playheadMap into systems (rows of staves)
+        const systems = [];
+        let currentSys = null;
+        playheadMap.forEach(entry => {
+          const entryHeight = entry.height || 150;
+          if (!currentSys) {
+            currentSys = { minY: entry.y, maxY: entry.y + entryHeight, beats: [entry.beat], entries: [entry] };
+            systems.push(currentSys);
+          } else {
+            // System boundary check (significant Y jump or wrap-around in X coordinate)
+            const isNewSystem = (entry.y > currentSys.maxY + 120) || (entry.x < currentSys.entries[currentSys.entries.length - 1].x - 200);
+            if (isNewSystem) {
+              currentSys = { minY: entry.y, maxY: entry.y + entryHeight, beats: [entry.beat], entries: [entry] };
+              systems.push(currentSys);
+            } else {
+              currentSys.entries.push(entry);
+              if (entry.y < currentSys.minY) currentSys.minY = entry.y;
+              if (entry.y + entryHeight > currentSys.maxY) currentSys.maxY = entry.y + entryHeight;
+              currentSys.beats.push(entry.beat);
+            }
+          }
+        });
+        systemsRef.current = systems;
       } catch (calcErr) {
         console.warn("Could not pre-calculate cursor coordinates, utilizing linear map fallback:", calcErr);
         const fallbackMap = [];
@@ -446,30 +475,35 @@ export default function App() {
           fallbackMap.push({ beat: n.onset_beat, x: (n.onset_beat * 200) + 120, y: 100 });
         });
         playheadMapRef.current = fallbackMap;
+        systemsRef.current = [{ minY: 50, maxY: 150, beats: [0, 9999], entries: [] }];
       }
       
       // Step 2: Cache all VexFlow elements positions (both X and Y)
       const cachedVf = [];
-      const vfNodes = container.querySelectorAll('[class*="vf-"]');
+      // Only target parent musical element groups (stavenotes, rests, beams, curves, annotations, ledgerlines)
+      // to prevent individual child components (stems, noteheads) from appearing with a delay.
+      const vfNodes = container.querySelectorAll('.vf-stavenote, .vf-rest, .vf-staverest, .vf-slur, .vf-tie, .vf-curve, .vf-tuplet, .vf-grace-note, .vf-articulation, .vf-dynamic, .vf-beam, .vf-ledgerline');
+      const systems = systemsRef.current || [];
+      
       vfNodes.forEach(el => {
-        const className = el.getAttribute('class') || '';
-        if (
-          className.includes('vf-stave') || 
-          className.includes('vf-clef') || 
-          className.includes('vf-key-signature') || 
-          className.includes('vf-time-signature')
-        ) {
+        // Safety check to ensure we don't accidentally hide stave components
+        const isStaveComponent = el.closest && el.closest('[class*="vf-stave"], [class*="vf-clef"], [class*="vf-key-signature"], [class*="vf-time-signature"]');
+        if (isStaveComponent) {
           return;
         }
+        
         const elRect = el.getBoundingClientRect();
         const elX = elRect.left - containerRect.left + container.scrollLeft;
         const elY = elRect.top - containerRect.top + container.scrollTop;
+        
+        // Find which system row this element belongs to
+        const systemIdx = systems.findIndex(sys => elY >= sys.minY - 50 && elY <= sys.maxY + 50);
         
         // Hide notes immediately so they only appear exactly when played
         el.style.opacity = '0';
         el.style.transition = 'none'; // Instant pop (no fade-in)
         
-        cachedVf.push({ el, x: elX, y: elY });
+        cachedVf.push({ el, x: elX, y: elY, systemIdx });
       });
       
       vfElementsRef.current = cachedVf;
@@ -560,10 +594,41 @@ export default function App() {
           container.scrollLeft = cameraXRef.current;
           container.scrollTop = cameraYRef.current;
           
+          // Find the active system index
+          const systems = systemsRef.current || [];
+          let activeSystemIdx = -1;
+          for (let i = 0; i < systems.length; i++) {
+            const sys = systems[i];
+            if (elapsedBeats >= sys.beats[0] && elapsedBeats <= sys.beats[sys.beats.length - 1]) {
+              activeSystemIdx = i;
+              break;
+            }
+          }
+          if (activeSystemIdx === -1 && systems.length > 0) {
+            if (elapsedBeats < systems[0].beats[0]) {
+              activeSystemIdx = 0;
+            } else {
+              activeSystemIdx = systems.length - 1;
+            }
+          }
+          
           // Dynamic reveal animation (no fade-in, pop instantly when played)
-          // A note is in the future if it is on a lower line (system) or ahead of playhead on current line
+          // A note is in the future if it's on a future system row, or ahead of the playhead on the current row
           vfElementsRef.current.forEach(item => {
-            const isFuture = (item.y > playheadY + 40) || (Math.abs(item.y - playheadY) <= 40 && item.x > playheadX + 4);
+            let isFuture = false;
+            if (item.systemIdx !== -1) {
+              if (item.systemIdx > activeSystemIdx) {
+                isFuture = true;
+              } else if (item.systemIdx === activeSystemIdx) {
+                isFuture = item.x > playheadX + 4;
+              } else {
+                isFuture = false;
+              }
+            } else {
+              // Fallback Y-check if outside defined systems
+              isFuture = (item.y > playheadY + 40) || (Math.abs(item.y - playheadY) <= 40 && item.x > playheadX + 4);
+            }
+            
             if (isFuture) {
               item.el.style.opacity = '0';
             } else {
@@ -582,40 +647,50 @@ export default function App() {
             
             canvasCtx.save();
             
-            // Decouple video coordinates from DOM width!
-            // Calculate absolute smoothed playhead coordinate in the SVG
-            // Use exact playheadX for horizontal panning to eliminate any speed lag/acceleration (constant BPM speed)
-            const exactCameraX = playheadX;
-            const smoothedPlayheadY = cameraYRef.current + (containerRect.height / 2);
-            
-            // Apply optical zoom to keep video HD despite the math layout shrink
+            // Apply optical zoom
             const videoScale = 1.4;
             canvasCtx.translate(canvas.width / 2, canvas.height / 2);
             canvasCtx.scale(videoScale, videoScale);
             canvasCtx.translate(-canvas.width / 2, -canvas.height / 2);
             
-            // Translate the canvas to center the absolute playhead perfectly at 1280x720 video center (640x360)
+            // Translate the canvas to center the absolute playhead
+            const exactCameraX = playheadX;
+            const smoothedPlayheadY = cameraYRef.current + (containerRect.height / 2);
             const videoOffsetX = (canvas.width / 2) - exactCameraX;
             const videoOffsetY = (canvas.height / 2) - smoothedPlayheadY;
             
             canvasCtx.translate(videoOffsetX, videoOffsetY);
             
-            // 1. Draw Background Layer (Staves, Clefs, empty)
+            // 1. Draw background staves (always 100% visible)
             canvasCtx.drawImage(bgImageRef.current, 0, 0);
             
-            // 2. Draw Foreground Layer (Notes) via precise Discrete Clipping Mask
+            // 2. Create system-aware clipping mask for foreground notes
+            canvasCtx.save();
             canvasCtx.beginPath();
-            // Reveal everything in previous systems (above current playhead Y)
-            canvasCtx.rect(0, 0, bgImageRef.current.width, playheadY - 20);
             
-            // Reveal current system strictly up to the exact discrete X position of the last played beat
-            // This forces notes to POP perfectly in sync with the audio, stopping the "fast wipe" effect
-            const discreteX = prevEntry ? prevEntry.x : playheadX;
-            canvasCtx.rect(0, playheadY - 20, discreteX + 15, 300);
+            for (let i = 0; i < systems.length; i++) {
+              const sys = systems[i];
+              const top = sys.minY - 50;
+              const bottom = sys.maxY + 50;
+              const height = bottom - top;
+              
+              if (i < activeSystemIdx) {
+                // Past systems: fully reveal notes
+                canvasCtx.rect(0, top, 99999, height);
+              } else if (i === activeSystemIdx) {
+                // Current system: reveal up to playheadX + 4
+                canvasCtx.rect(0, top, playheadX + 4, height);
+              }
+              // Future systems: stay hidden
+            }
+            
             canvasCtx.clip();
             
+            // 3. Draw foreground notes (clipped by mask)
             canvasCtx.drawImage(fgImageRef.current, 0, 0);
-            canvasCtx.restore();
+            
+            canvasCtx.restore(); // Restore clip
+            canvasCtx.restore(); // Restore zoom/translation
           }
         }
         
@@ -742,7 +817,6 @@ export default function App() {
       recorder.start(100); // Collect data chunks frequently to avoid memory bloat
       setIsRecording(true);
       
-      // -- ULTRA FAST DUAL-LAYER SVG CACHING --
       // Force explicit dimensions so XMLSerializer doesn't lose the viewport framing
       const container = osmdContainerRef.current;
       const svgElement = container.querySelector('svg');
@@ -751,34 +825,52 @@ export default function App() {
         svgElement.setAttribute('width', svgRect.width);
         svgElement.setAttribute('height', svgRect.height);
         
-        // Background Layer (Empty Staves)
-        const bgSvg = svgElement.cloneNode(true);
-        bgSvg.querySelectorAll('.vf-stavenote, .vf-stem, .vf-beam, .vf-notehead, .vf-modifiers').forEach(el => el.remove());
-        const bgData = new XMLSerializer().serializeToString(bgSvg);
-        const bgUrl = URL.createObjectURL(new Blob([bgData], { type: 'image/svg+xml;charset=utf-8' }));
-        const bgImg = new Image();
-        await new Promise(r => { bgImg.onload = r; bgImg.src = bgUrl; });
-        bgImageRef.current = bgImg;
-        URL.revokeObjectURL(bgUrl);
+        // 1. Temporarily restore all elements opacity to 1.0 for perfect caching
+        if (vfElementsRef.current) {
+          vfElementsRef.current.forEach(item => {
+            item.el.style.opacity = '1';
+          });
+        }
         
-        // Foreground Layer (All Notes Fully Visible)
+        // 2. Cache Background Image (staves, clefs, measures)
+        const bgSvg = svgElement.cloneNode(true);
+        bgSvg.querySelectorAll('.vf-stavenote, .vf-stem, .vf-notehead, .vf-modifiers, .vf-rest, .vf-staverest, .vf-slur, .vf-tie, .vf-curve, .vf-tuplet, .vf-grace-note, .vf-grace-note-group, .vf-articulation, .vf-dynamic, [class*="ledger"], .vf-beam').forEach(el => el.remove());
+        const bgData = new XMLSerializer().serializeToString(bgSvg);
+        const bgBlob = new Blob([bgData], { type: 'image/svg+xml;charset=utf-8' });
+        const bgUrl = URL.createObjectURL(bgBlob);
+        const bgImg = new Image();
+        bgImg.onload = () => {
+          bgImageRef.current = bgImg;
+          URL.revokeObjectURL(bgUrl);
+        };
+        bgImg.src = bgUrl;
+        
+        // 3. Cache Foreground Image (notes, rests, accidentals)
         const fgSvg = svgElement.cloneNode(true);
-        fgSvg.querySelectorAll('.vf-stavenote, .vf-notehead, .vf-stem, .vf-beam').forEach(el => {
-          el.style.opacity = '1';
-        });
+        fgSvg.querySelectorAll('.vf-stave, .vf-clef, .vf-key-signature, .vf-time-signature').forEach(el => el.remove());
         const fgData = new XMLSerializer().serializeToString(fgSvg);
-        const fgUrl = URL.createObjectURL(new Blob([fgData], { type: 'image/svg+xml;charset=utf-8' }));
+        const fgBlob = new Blob([fgData], { type: 'image/svg+xml;charset=utf-8' });
+        const fgUrl = URL.createObjectURL(fgBlob);
         const fgImg = new Image();
-        await new Promise(r => { fgImg.onload = r; fgImg.src = fgUrl; });
-        fgImageRef.current = fgImg;
-        URL.revokeObjectURL(fgUrl);
+        fgImg.onload = () => {
+          fgImageRef.current = fgImg;
+          URL.revokeObjectURL(fgUrl);
+        };
+        fgImg.src = fgUrl;
+        
+        // 4. Restore hidden state in the active DOM immediately
+        if (vfElementsRef.current) {
+          vfElementsRef.current.forEach(item => {
+            item.el.style.opacity = '0';
+          });
+        }
       }
       
-      // Auto-trigger playback animation which will rapidly paint our cached layers!
+      // Auto-trigger playback animation
       startPlayback();
     } catch (err) {
       console.error("Recording setup error:", err);
-      alert("Falha na renderização de fundo: " + err.message);
+      alert("Falha ao iniciar gravação: " + err.message);
     }
   };
 
@@ -946,7 +1038,7 @@ export default function App() {
 
           {/* MATH DIAGNOSTICS PANEL */}
           <div style={{ position: 'fixed', bottom: 10, right: 10, background: 'black', color: 'lime', padding: '10px', zIndex: 9999, fontFamily: 'monospace' }}>
-            <div>Audio Last Beat: {(notesInfo && notesInfo.notes && notesInfo.notes.length > 0) ? notesInfo.notes[notesInfo.notes.length - 1].onset_beat.toFixed(2) : 'N/A'}</div>
+            <div>Audio Last Beat: {(notesDataRef.current && notesDataRef.current.notes && notesDataRef.current.notes.length > 0) ? notesDataRef.current.notes[notesDataRef.current.notes.length - 1].onset_beat.toFixed(2) : 'N/A'}</div>
             <div>Visual Last Beat: {(playheadMapRef.current && playheadMapRef.current.length > 0) ? playheadMapRef.current[playheadMapRef.current.length - 1].beat.toFixed(2) : 'N/A'}</div>
           </div>
           
