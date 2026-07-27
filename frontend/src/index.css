@@ -1,32 +1,32 @@
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400..900;1,400..900&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
 
 :root {
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Tahoma', 'Segoe UI', 'Arial', sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: dark;
-  color: #eae0ce; /* Soft ivory text */
-  background-color: #0b0705; /* Deep ebony wood black */
+  color-scheme: light;
+  color: #000000; /* Windows XP standard black text */
+  background-color: #5a7edc; /* Windows XP Luna blue desktop color */
 
-  /* CSS Variable Tokens - Acoustic Piano Theme */
-  --bg-main: #0b0705;
-  --bg-gradient: radial-gradient(circle at 50% 0%, #22140e 0%, #0b0705 85%); /* Polished mahogany veneer warm glow */
-  --bg-card: rgba(24, 16, 12, 0.8); /* Semi-transparent dark wood background */
-  --bg-inner-card: rgba(15, 10, 8, 0.55);
-  --border-glass: rgba(197, 160, 89, 0.15); /* Polished brass frame */
-  --border-glass-hover: rgba(197, 160, 89, 0.38); /* Brighter brass on hover */
+  /* CSS Variable Tokens - Windows XP Luna Theme */
+  --bg-main: #5a7edc;
+  --bg-gradient: none;
+  --bg-card: #ece9d8; /* Luna dialog background */
+  --bg-inner-card: #ffffff; /* White inset container */
+  --border-glass: #0054e3; /* Luna window border */
+  --border-glass-hover: #0054e3;
   
-  --accent-violet: #c5a059; /* Standard brushed gold/brass */
-  --accent-pink: #9e2c2c; /* Piano felt red/burgundy */
-  --accent-cyan: #e6dfd3; /* Ivory white key */
-  --accent-emerald: #315c43; /* Forest green damper felt */
-  --accent-red: #ba3030; /* Red alert felt */
+  --accent-violet: #0054e3; /* Luna blue button border */
+  --accent-pink: #d32f2f;
+  --accent-cyan: #3870d8;
+  --accent-emerald: #00b000;
+  --accent-red: #d32f2f;
   
-  --text-muted: rgba(234, 224, 206, 0.65);
-  --text-muted-darker: rgba(234, 224, 206, 0.45);
+  --text-muted: #555555;
+  --text-muted-darker: #777777;
   
-  --glow-shadow: 0 0 15px rgba(197, 160, 89, 0.18);
+  --glow-shadow: none;
 }
 
 body {
@@ -34,25 +34,28 @@ body {
   padding: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: var(--bg-gradient);
+  background-color: #5a7edc; /* Classic default Windows XP background blue */
+  background-image: radial-gradient(circle at 10% 20%, rgba(90, 126, 220, 0.8) 0%, rgba(90, 126, 220, 1) 90%);
   overflow-x: hidden;
+  font-family: 'Tahoma', sans-serif;
 }
 
 /* Custom Scrollbars */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 16px;
+  height: 16px;
 }
 ::-webkit-scrollbar-track {
-  background: #0b0705;
+  background: #ece9d8;
+  border: 1px solid #999999;
 }
 ::-webkit-scrollbar-thumb {
-  background: #22140e;
-  border-radius: 4px;
-  border: 1px solid rgba(197, 160, 89, 0.15);
+  background: #ece9d8;
+  border: 2px outset #ffffff;
+  box-sizing: border-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #c5a059;
+  background: #f1efe2;
 }
 
 /* App Container Layout */
@@ -83,38 +86,37 @@ body {
 }
 
 .logo-icon {
-  background: linear-gradient(135deg, #eae0ce 0%, #c5a059 50%, #9e7931 100%);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  padding: 11px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 4px 15px rgba(197, 160, 89, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.3);
+  background: #ece9d8;
+  border: 2px outset #ffffff;
+  padding: 8px;
+  border-radius: 4px;
+  box-shadow: none;
 }
 
 .logo-icon svg {
-  color: #1a0f0a; /* Dark wood inside brass icon */
-  width: 28px;
-  height: 28px;
+  color: #0054e3;
+  width: 24px;
+  height: 24px;
 }
 
 .app-title {
-  font-family: 'Playfair Display', serif;
-  font-size: 3rem;
+  font-family: 'Tahoma', sans-serif;
+  font-size: 2.5rem;
   font-weight: 800;
   margin: 0;
-  background: linear-gradient(135deg, #fbf7eb 0%, #ebd08f 40%, #c5a059 70%, #9e7931 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  text-shadow: 0 2px 10px rgba(158, 121, 49, 0.12);
-  letter-spacing: -0.5px;
+  background: none;
+  -webkit-background-clip: initial;
+  -webkit-text-fill-color: initial;
+  background-clip: initial;
+  color: #ffffff;
+  text-shadow: 2px 2px 2px #002c7a;
+  letter-spacing: 0px;
 }
 
 .app-subtitle {
-  font-size: 0.95rem;
-  color: var(--text-muted);
+  font-size: 0.85rem;
+  color: #f0f4ff;
+  text-shadow: 1px 1px 1px #002c7a;
   max-width: 550px;
   margin-top: 14px;
   margin-bottom: 0;
@@ -145,56 +147,78 @@ body {
 
 /* Glassmorphism Cards with Dark Wood Aesthetic */
 .glass-container {
-  background: var(--bg-card);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid var(--border-glass);
-  border-radius: 20px;
-  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.6), inset 0 1px 0px rgba(255, 255, 255, 0.05);
-  padding: 24px;
+  background: #ece9d8; /* Luna dialogue background */
+  border: 4px solid #0054e3;
+  border-radius: 8px 8px 0px 0px;
+  box-shadow: 3px 3px 15px rgba(0, 0, 0, 0.4);
+  padding: 16px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
+  transition: none;
+  overflow: hidden;
 }
 
 .glass-container:hover {
-  border-color: var(--border-glass-hover);
-  box-shadow: 0 12px 45px 0 rgba(0, 0, 0, 0.7), 0 0 15px rgba(197, 160, 89, 0.1);
+  border-color: #0054e3;
+  box-shadow: 3px 3px 15px rgba(0, 0, 0, 0.4);
 }
 
-/* Header inside Cards */
+.glass-container:has(.card-header) {
+  padding: 0;
+}
+
+/* Header inside Cards - styled like an active XP title bar */
 .card-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  border-bottom: 1px solid rgba(197, 160, 89, 0.15);
-  padding-bottom: 12px;
-  margin-bottom: 20px;
+  justify-content: space-between;
+  background: linear-gradient(180deg, #0058e6 0%, #3a93ff 50%, #0058e6 100%);
+  border-bottom: 1px solid #002c7a;
+  padding: 6px 12px;
+  margin-bottom: 0;
+  border-radius: 3px 3px 0 0;
 }
 
 .card-header h2 {
-  font-family: 'Playfair Display', serif;
-  font-size: 1.25rem;
+  font-family: 'Tahoma', sans-serif !important;
+  font-size: 0.85rem !important;
   font-weight: 700;
   margin: 0;
-  color: #fff;
+  color: #ffffff !important;
+  text-shadow: 1px 1px 1px #002c7a;
+  text-transform: none;
   letter-spacing: 0.2px;
 }
 
-.card-header svg {
-  width: 20px;
-  height: 20px;
+.card-header::after {
+  content: "🗕 🗖 🗙";
+  color: #ffffff;
+  font-family: 'Arial', sans-serif;
+  font-size: 0.85rem;
+  letter-spacing: 5px;
+  font-weight: bold;
+  opacity: 0.85;
+  cursor: pointer;
 }
 
-.text-violet { color: var(--accent-violet); }
-.text-pink { color: var(--accent-pink); }
-.text-cyan { color: var(--accent-cyan); }
+.card-header svg {
+  display: none; /* Hide modern icons for retro layout */
+}
+
+/* Target content sibling of card-header for padding */
+.card-header + * {
+  padding: 16px;
+}
+
+.text-violet { color: #000000; }
+.text-pink { color: #000000; }
+.text-cyan { color: #000000; }
 
 /* Audio Upload Zone (Burgundy Felt Style) */
 .upload-zone {
-  border: 2px dashed rgba(197, 160, 89, 0.25);
-  border-radius: 16px;
+  border: 2px inset #7f9db9; /* Standard XP input border */
+  border-radius: 0;
   padding: 32px 20px;
   display: flex;
   flex-direction: column;
@@ -202,48 +226,49 @@ body {
   justify-content: center;
   text-align: center;
   cursor: pointer;
-  background: rgba(158, 44, 44, 0.04); /* Subtle velvet felt tint */
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  background: #ffffff; /* Explorer folder white background */
+  transition: none;
   min-height: 200px;
   box-sizing: border-box;
 }
 
 .upload-zone:hover {
-  border-color: var(--accent-violet);
-  background: rgba(158, 44, 44, 0.08); /* Felt red glow */
-  transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(158, 44, 44, 0.12);
+  border-color: #0054e3;
+  background: #ffffff;
+  transform: none;
+  box-shadow: none;
 }
 
 .upload-zone.active {
-  border-color: var(--accent-violet);
-  background: rgba(158, 44, 44, 0.15);
-  transform: scale(1.01);
+  border-color: #0054e3;
+  background: #e0ecff; /* XP selection highlight */
+  transform: none;
 }
 
 .upload-zone svg {
   width: 44px;
   height: 44px;
-  color: var(--accent-violet);
+  color: #3870d8;
   margin-bottom: 16px;
-  transition: transform 0.3s ease;
+  transition: none;
 }
 
 .upload-zone:hover svg {
-  transform: translateY(-4px);
+  transform: none;
 }
 
 .upload-filename {
+  font-family: 'Tahoma', sans-serif;
   font-weight: 600;
-  font-size: 0.95rem;
-  color: #fff;
+  font-size: 0.9rem;
+  color: #000000;
   margin: 0;
   word-break: break-all;
 }
 
 .upload-hint {
   font-size: 0.75rem;
-  color: var(--text-muted);
+  color: #555555;
   margin-top: 8px;
   margin-bottom: 0;
   max-width: 260px;
@@ -252,12 +277,12 @@ body {
 .upload-size-tag {
   margin-top: 16px;
   padding: 4px 12px;
-  background: rgba(197, 160, 89, 0.15);
-  border: 1px solid rgba(197, 160, 89, 0.4);
-  color: #ebd08f;
+  background: #f0f4ff;
+  border: 1px solid #7f9db9;
+  color: #002c7a;
   font-size: 0.75rem;
   font-weight: 600;
-  border-radius: 20px;
+  border-radius: 4px;
 }
 
 /* Control Fields */
@@ -273,7 +298,7 @@ body {
   justify-content: space-between;
   align-items: center;
   font-size: 0.85rem;
-  color: rgba(234, 224, 206, 0.9);
+  color: #000000;
 }
 
 .label-title {
@@ -284,7 +309,7 @@ body {
 
 .label-help {
   font-size: 0.75rem;
-  color: var(--text-muted-darker);
+  color: #555555;
   cursor: help;
 }
 
@@ -293,16 +318,16 @@ body {
   font-size: 0.85rem;
 }
 
-.value-violet { color: #ebd08f; }
-.value-pink { color: #ff8888; }
-.value-cyan { color: #eae0ce; }
+.value-violet { color: #002c7a; }
+.value-pink { color: #8a0000; }
+.value-cyan { color: #002c7a; }
 
 /* Form Elements */
 .range-input {
   width: 100%;
-  height: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 4px;
+  height: 10px;
+  background: #ffffff;
+  border: 1px solid #7f9db9;
   outline: none;
   appearance: none;
   cursor: pointer;
@@ -311,41 +336,38 @@ body {
 
 .range-input::-webkit-slider-thumb {
   appearance: none;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  transition: transform 0.1s ease;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  width: 12px;
+  height: 20px;
+  background: #ece9d8;
+  border: 2px outset #ffffff;
+  border-radius: 2px;
+  box-shadow: 1px 1px 2px rgba(0,0,0,0.3);
 }
 
-.range-input.violet::-webkit-slider-thumb {
-  background: linear-gradient(135deg, #eae0ce 0%, #c5a059 100%);
-  box-shadow: 0 2px 6px rgba(197, 160, 89, 0.5);
-}
-.range-input.pink::-webkit-slider-thumb {
-  background: linear-gradient(135deg, #bd3a3a 0%, #731a1a 100%);
-  box-shadow: 0 2px 6px rgba(158, 42, 44, 0.5);
-}
+.range-input.violet::-webkit-slider-thumb,
+.range-input.pink::-webkit-slider-thumb,
 .range-input.cyan::-webkit-slider-thumb {
-  background: linear-gradient(135deg, #fdfbf7 0%, #eae0ce 100%);
-  box-shadow: 0 2px 6px rgba(234, 224, 206, 0.5);
+  background: #ece9d8;
+  border: 2px outset #ffffff;
+  box-shadow: 1px 1px 2px rgba(0,0,0,0.3);
 }
 
 .range-input::-webkit-slider-thumb:hover {
-  transform: scale(1.25);
+  background: #f1efe2;
 }
 
 .select-input {
   width: 100%;
-  background: #140e0b;
-  border: 1px solid rgba(197, 160, 89, 0.2);
-  border-radius: 10px;
-  padding: 10px 14px;
+  background: #ffffff;
+  border: 1px solid #7f9db9;
+  border-radius: 0;
+  padding: 6px 10px;
   font-size: 0.85rem;
-  color: #eae0ce;
+  color: #000000;
   outline: none;
-  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  transition: none;
   box-sizing: border-box;
+  font-family: 'Tahoma', sans-serif;
 }
 
 .select-input:focus {
@@ -353,66 +375,75 @@ body {
   box-shadow: 0 0 8px rgba(197, 160, 89, 0.25);
 }
 
-/* Custom Primary Button (Polished Brass Finish) */
+/* Custom Primary Button - Windows XP Luna Blue Button */
 .btn-primary {
   width: 100%;
-  padding: 14px;
-  border-radius: 12px;
+  padding: 10px 14px;
+  border-radius: 4px;
   font-weight: 700;
-  font-size: 0.95rem;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: #1a0f0a; /* Dark wood color text for contrast */
-  background: linear-gradient(135deg, #f0dfb6 0%, #c5a059 50%, #9e7931 100%);
+  font-size: 0.9rem;
+  border: 1px solid #002c7a;
+  color: #ffffff;
+  background: linear-gradient(180deg, #5b92e5 0%, #2f6fd1 40%, #1e56b8 45%, #1d4da7 100%);
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: 0 4px 15px rgba(197, 160, 89, 0.25);
+  transition: none;
+  box-shadow: none;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
+  font-family: 'Tahoma', sans-serif;
+  text-shadow: 1px 1px 1px #001f5c;
 }
 
 .btn-primary:hover:not(:disabled) {
-  transform: translateY(-2px);
-  background: linear-gradient(135deg, #f7ebd0 0%, #d4af37 50%, #aa7c11 100%);
-  box-shadow: 0 8px 24px rgba(197, 160, 89, 0.45);
+  background: linear-gradient(180deg, #ffdfa5 0%, #ffb63c 100%);
+  color: #000000;
+  border-color: #ff9000;
+  text-shadow: none;
 }
 
 .btn-primary:active:not(:disabled) {
-  transform: translateY(0);
+  border-style: inset;
 }
 
 .btn-primary:disabled {
-  background: #201714;
-  color: rgba(234, 224, 206, 0.2);
-  border-color: rgba(255, 255, 255, 0.03);
+  background: #cccccc;
+  color: #888888;
+  border-color: #999999;
   cursor: not-allowed;
   box-shadow: none;
+  text-shadow: none;
 }
 
-/* Custom Secondary Button */
+/* Custom Secondary Button - Windows XP Classic Dialog Button */
 .btn-secondary {
   width: 100%;
-  padding: 12px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: 3px;
   font-weight: 600;
-  font-size: 0.9rem;
-  border: 1px solid rgba(197, 160, 89, 0.35);
-  background: rgba(197, 160, 89, 0.05);
-  color: #ebd08f;
+  font-size: 0.85rem;
+  border: 2px outset #ffffff;
+  background: #ece9d8;
+  color: #000000;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: none;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   box-sizing: border-box;
+  font-family: 'Tahoma', sans-serif;
 }
 
 .btn-secondary:hover {
-  background: rgba(197, 160, 89, 0.12);
-  border-color: rgba(197, 160, 89, 0.6);
-  color: #fff;
+  background: #f1efe2;
+  color: #000000;
+  border-color: #ffffff;
+}
+
+.btn-secondary:active {
+  border-style: inset;
 }
 
 /* Empty State / Status Panel placeholder */
@@ -512,40 +543,52 @@ body {
 
 .progress-message {
   font-weight: 600;
-  color: #ebd08f;
+  color: #000000;
   flex-grow: 1;
+  font-family: 'Tahoma', sans-serif;
 }
 
 .progress-percent {
-  color: var(--text-muted);
+  color: #333333;
 }
 
 .progress-bar-bg {
   width: 100%;
-  background: rgba(255, 255, 255, 0.05);
-  height: 8px;
-  border-radius: 10px;
+  background: #ffffff;
+  height: 18px; /* Classic thick XP bar */
+  border: 1px solid #7f9db9;
+  border-radius: 0;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.03);
+  box-shadow: inset 1px 1px 2px rgba(0,0,0,0.1);
+  padding: 1px;
+  box-sizing: border-box;
 }
 
 .progress-bar-fill {
-  background: linear-gradient(90deg, #c5a059 0%, #ebd08f 50%, #9e7931 100%);
+  background: repeating-linear-gradient(
+    90deg,
+    #00b000,
+    #00b000 8px,
+    #ffffff 8px,
+    #ffffff 10px
+  ); /* Segmented green blocks */
   height: 100%;
-  border-radius: 10px;
+  border-radius: 0;
   transition: width 0.4s ease-out;
-  box-shadow: 0 0 10px rgba(197, 160, 89, 0.35);
+  box-shadow: none;
 }
 
 .info-note {
-  background: rgba(197, 160, 89, 0.06);
-  border: 1px solid rgba(197, 160, 89, 0.18);
-  color: #ebd08f;
-  padding: 12px 16px;
-  border-radius: 12px;
+  background: #ffffe1; /* Yellow warning sticky note style! */
+  border: 1px solid #808080;
+  color: #000000;
+  padding: 10px 14px;
+  border-radius: 0;
   font-size: 0.75rem;
   line-height: 1.5;
   margin-top: 16px;
+  box-shadow: 1px 1px 3px rgba(0,0,0,0.15);
+  font-family: 'Tahoma', sans-serif;
 }
 
 /* Status Notifications */
@@ -701,14 +744,7 @@ body {
   gap: 10px;
 }
 
-.score-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background-color: var(--accent-violet);
-  box-shadow: 0 0 8px var(--accent-violet);
-  animation: pulse-dot 1.5s infinite;
-}
+
 
 @keyframes pulse-dot {
   0% { transform: scale(0.9); opacity: 0.5; }
@@ -733,14 +769,14 @@ body {
 /* OSMD Container overrides - styled like luxury parchment manuscript paper */
 #osmd-container {
   width: 100%;
-  background-color: #fdfbf7; /* Classic warm cream parchment */
-  border-radius: 12px;
+  background-color: #ffffff; /* Minimalist clean white */
+  border-radius: 8px;
   padding: 24px;
-  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.06), 0 4px 25px rgba(0, 0, 0, 0.15);
+  box-shadow: none;
   min-height: 250px;
   overflow-x: auto;
   box-sizing: border-box;
-  border: 1px solid rgba(197, 160, 89, 0.22);
+  border: 1px solid #d1d5db; /* Clean gray border */
   scrollbar-width: none; /* Hide scrollbar Firefox */
 }
 #osmd-container::-webkit-scrollbar {

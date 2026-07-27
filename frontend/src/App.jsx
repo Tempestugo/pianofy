@@ -584,6 +584,8 @@ export default function App() {
           playheadY = prevEntry.y;
         }
         
+
+        
         // Smoothly scroll the container to center on the playhead (fast damping LERP)
         if (playheadX > 0) {
           const targetScrollLeft = playheadX - (containerRect.width / 2);
@@ -646,7 +648,7 @@ export default function App() {
             const canvasCtx = canvas.getContext('2d');
             
             // Draw background parchment color
-            canvasCtx.fillStyle = '#fdfbf7';
+            canvasCtx.fillStyle = '#ffffff';
             canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
             
             canvasCtx.save();
@@ -737,6 +739,8 @@ export default function App() {
         item.el.style.opacity = '1';
       });
     }
+
+
 
     // Stop recording if active
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
@@ -1004,9 +1008,7 @@ export default function App() {
             Pianofy
           </h1>
         </div>
-        <p className="app-subtitle">
-          Transforme improvisos de piano solo em partituras limpas e profissionais em segundos usando Deep Learning de última geração.
-        </p>
+
       </header>
 
       {/* Main Workspace */}
@@ -1441,9 +1443,7 @@ export default function App() {
                       <span className="requantize-prompt-title">Ajuste Fino de Quantização</span>
                       {isRequantizing && <Loader2 className="animate-spin text-violet" style={{ width: '14px', height: '14px' }} />}
                     </div>
-                    <p className="requantize-prompt-desc">
-                      Não gostou do ritmo gerado? Modifique a grade na barra lateral. A requantização será aplicada **instantaneamente** sem reprocessar o áudio.
-                    </p>
+
                   </div>
                 </div>
               )}
@@ -1481,7 +1481,6 @@ export default function App() {
           <div className="score-header" style={{ display: 'flex', flexDirection: 'column', gap: '16px', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '16px', marginBottom: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
               <div className="score-title">
-                <div className="score-dot"></div>
                 <h2>Partitura Interativa & Animação</h2>
               </div>
               
@@ -1593,11 +1592,7 @@ export default function App() {
               </div>
             </div>
             
-            {viewMode === 'animation' && (
-              <p style={{ fontSize: '0.75rem', color: '#8c8ca2', margin: 0 }}>
-                💡 <b>Dica:</b> No modo contínuo, a tela deslizará da esquerda para a direita simulando um vídeo animado, ideal para acompanhar tocando em tempo real.
-              </p>
-            )}
+
           </div>
           
           <div style={{ position: 'relative', width: '100%' }}>
