@@ -157,6 +157,43 @@ def filter_finger_slips(note_events):
         kept.append(note_ev)
     return kept
 
+def apply_pedal_to_durations(note_events, pedal_events):
+    """
+    Extends note offset_time if the sustain pedal is held down when the note ends.
+    The note is sustained until the pedal is released or the exact same pitch is played again.
+    """
+    if not pedal_events or not note_events:
+        return note_events
+        
+    notes = sorted(note_events, key=lambda x: x['onset_time'])
+    pedals = sorted(pedal_events, key=lambda x: x['onset_time'])
+    
+    for i, note in enumerate(notes):
+        offset = note['offset_time']
+        pitch = note['midi_note']
+        
+        active_pedal_release = None
+        for p in pedals:
+            if p['onset_time'] <= offset + 0.1 and p['offset_time'] >= offset:
+                active_pedal_release = p['offset_time']
+                break
+                
+        if active_pedal_release:
+            next_onset = active_pedal_release
+            for j in range(i + 1, len(notes)):
+                next_note = notes[j]
+                if next_note['onset_time'] > active_pedal_release:
+                    break
+                if next_note['midi_note'] == pitch:
+                    # Same pitch played again, cut the sustain here
+                    next_onset = next_note['onset_time']
+                    break
+            
+            # Extend duration without exceeding the pedal release time or next identical note
+            note['offset_time'] = max(note['offset_time'], next_onset)
+            
+    return notes
+
 def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signature="4/4"):
     """
     Quantizes note onsets and durations in beat-space and fills small silence gaps
@@ -296,52 +333,82 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
         right_hand.insert(0, meter.TimeSignature(time_signature))
         left_hand.insert(0, meter.TimeSignature(time_signature))
         
+    # Dynamic split state
+    current_split = split_point
+
+    # Group elements by offset to process chords/simultaneous notes together
+    elements_by_offset = {}
     for element in flat_stream:
-        offset = element.offset
-        
-        # Skip original time signatures and tempo marks if we are overriding
         if isinstance(element, (meter.TimeSignature, tempo.MetronomeMark)):
             continue
+        if isinstance(element, (note.Note, chord.Chord, key.KeySignature)):
+            elements_by_offset.setdefault(element.offset, []).append(element)
             
-        if isinstance(element, note.Note):
-            if element.pitch.midi >= split_point:
-                right_hand.insert(offset, element)
-            else:
-                left_hand.insert(offset, element)
+    for offset in sorted(elements_by_offset.keys()):
+        group = elements_by_offset[offset]
+        
+        for element in group:
+            if isinstance(element, key.KeySignature):
+                right_hand.insert(offset, copy.deepcopy(element))
+                left_hand.insert(offset, copy.deepcopy(element))
+                continue
                 
-        elif isinstance(element, chord.Chord):
-            # SPLIT chord notes between treble and bass parts based on custom split_point
-            treble_pitches = [p for p in element.pitches if p.midi >= split_point]
-            bass_pitches = [p for p in element.pitches if p.midi < split_point]
+            # Extract all pitches at this offset for dynamic split evaluation
+            pitches = []
+            if isinstance(element, note.Note):
+                pitches.append(element.pitch.midi)
+            elif isinstance(element, chord.Chord):
+                pitches.extend([p.midi for p in element.pitches])
+                
+            if pitches:
+                # If we have multiple pitches, find a large gap to split
+                pitches.sort()
+                if len(pitches) >= 2:
+                    max_gap = 0
+                    best_split = current_split
+                    for i in range(len(pitches) - 1):
+                        gap = pitches[i+1] - pitches[i]
+                        if gap > max_gap:
+                            max_gap = gap
+                            # Split exactly in the middle of the largest gap
+                            best_split = pitches[i] + (gap / 2.0)
+                            
+                    # Smooth the split point (inertia)
+                    if max_gap >= 7: # at least a fifth gap to justify moving split
+                        current_split = (current_split * 0.7) + (best_split * 0.3)
+                else:
+                    # Single note: slightly pull split point towards center if it's very far
+                    p = pitches[0]
+                    if p > 72: # very high
+                        current_split = (current_split * 0.9) + (65 * 0.1)
+                    elif p < 48: # very low
+                        current_split = (current_split * 0.9) + (55 * 0.1)
             
-            if treble_pitches:
-                if len(treble_pitches) == 1:
-                    n = note.Note(treble_pitches[0])
-                    n.duration = copy.deepcopy(element.duration)
+            # Now assign notes
+            if isinstance(element, note.Note):
+                if element.pitch.midi >= current_split:
+                    right_hand.insert(offset, element)
+                else:
+                    left_hand.insert(offset, element)
+            elif isinstance(element, chord.Chord):
+                treble_pitches = [p for p in element.pitches if p.midi >= current_split]
+                bass_pitches = [p for p in element.pitches if p.midi < current_split]
+                
+                if treble_pitches:
+                    n_dur = copy.deepcopy(element.duration)
+                    if len(treble_pitches) == 1:
+                        n = note.Note(treble_pitches[0], duration=n_dur)
+                    else:
+                        n = chord.Chord(treble_pitches, duration=n_dur)
                     right_hand.insert(offset, n)
-                else:
-                    c = chord.Chord(treble_pitches)
-                    c.duration = copy.deepcopy(element.duration)
-                    right_hand.insert(offset, c)
-                    
-            if bass_pitches:
-                if len(bass_pitches) == 1:
-                    n = note.Note(bass_pitches[0])
-                    n.duration = copy.deepcopy(element.duration)
+                if bass_pitches:
+                    n_dur = copy.deepcopy(element.duration)
+                    if len(bass_pitches) == 1:
+                        n = note.Note(bass_pitches[0], duration=n_dur)
+                    else:
+                        n = chord.Chord(bass_pitches, duration=n_dur)
                     left_hand.insert(offset, n)
-                else:
-                    c = chord.Chord(bass_pitches)
-                    c.duration = copy.deepcopy(element.duration)
-                    left_hand.insert(offset, c)
-                    
-        elif isinstance(element, key.KeySignature):
-            # Mirror key signatures across both parts
-            right_hand.insert(offset, copy.deepcopy(element))
-            left_hand.insert(offset, copy.deepcopy(element))
-            
-    score.insert(0, right_hand)
-    score.insert(0, left_hand)
-    
+
     # Post-process parts to remove polyphonic overlaps and excessive rests
     def remove_polyphonic_overlaps(part):
         from music21 import note, chord
@@ -394,6 +461,9 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
     remove_polyphonic_overlaps(right_hand)
     remove_polyphonic_overlaps(left_hand)
     
+    score.insert(0, right_hand)
+    score.insert(0, left_hand)
+    
     return score
 
 def post_process_and_save_midi(
@@ -441,6 +511,9 @@ def post_process_and_save_midi(
         clean_note_events = filter_finger_slips(filtered_note_events)
     else:
         clean_note_events = filtered_note_events
+        
+    # Apply pedal-to-duration to merge sustained notes
+    clean_note_events = apply_pedal_to_durations(clean_note_events, est_pedal_events)
     
     # Pre-quantize and clean up legato overlaps and small silence gaps
     cleaned_note_events = quantize_and_clean_events(clean_note_events, bpm, allow_triplets=allow_triplets, time_signature=time_signature)
@@ -572,6 +645,9 @@ def quantize_and_export(
     print(f"Splitting quantized stream with time signature {time_signature}, tempo {bpm} BPM, and split boundary {split_point}...")
     flat_stream = score_stream.flatten()
     split_score = split_piano_grand_staff(flat_stream, time_signature=time_signature, bpm=bpm, split_point=split_point)
+    
+    print("Making well-formed notation with measures and ties...")
+    split_score.makeNotation(inPlace=True)
     
     # Export formats
     print(f"Exporting MusicXML to: {output_xml_path}")

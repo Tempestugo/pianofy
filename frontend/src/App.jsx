@@ -19,7 +19,7 @@ import {
 import confetti from 'canvas-confetti';
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay';
 
-const API_BASE = 'http://localhost:8000'; // FastAPI default port
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'; // Uses env variable on Vercel, defaults to local
 
 export default function App() {
   // File upload state
