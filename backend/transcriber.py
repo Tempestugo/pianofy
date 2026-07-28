@@ -5,6 +5,10 @@ import music21
 import copy
 import numpy as np
 
+import scipy.signal
+if not hasattr(scipy.signal, 'hann') and hasattr(scipy.signal, 'windows'):
+    scipy.signal.hann = scipy.signal.windows.hann
+
 # Automatically locate and add ffmpeg to PATH if missing
 if not shutil.which("ffmpeg"):
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -194,7 +198,7 @@ def apply_pedal_to_durations(note_events, pedal_events):
             
     return notes
 
-def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signature="4/4"):
+def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signature="4/4", beat_times_sec=None):
     """
     Quantizes note onsets and durations in beat-space and fills small silence gaps
     to prevent random loose rests and cluttered voice layouts.
@@ -203,7 +207,21 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
     if not note_events:
         return []
         
-    beat_len = 60.0 / bpm
+    if beat_times_sec is not None and len(beat_times_sec) >= 2:
+        beat_indices = np.arange(len(beat_times_sec))
+        def get_beat(t):
+            if t <= beat_times_sec[0]:
+                bpm_first = 60.0 / max(0.1, (beat_times_sec[1] - beat_times_sec[0]))
+                return (t - beat_times_sec[0]) * (bpm_first / 60.0)
+            elif t >= beat_times_sec[-1]:
+                bpm_last = 60.0 / max(0.1, (beat_times_sec[-1] - beat_times_sec[-2]))
+                return beat_indices[-1] + (t - beat_times_sec[-1]) * (bpm_last / 60.0)
+            else:
+                return np.interp(t, beat_times_sec, beat_indices)
+    else:
+        beat_len = 60.0 / max(1.0, bpm)
+        def get_beat(t):
+            return t / beat_len
     
     # Sort notes by onset
     sorted_notes = sorted(note_events, key=lambda x: x['onset_time'])
@@ -217,9 +235,9 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
     # Convert to beat space
     beat_notes = []
     for n in sorted_notes:
-        onset_beat = n['onset_time'] / beat_len
-        offset_beat = n['offset_time'] / beat_len
-        duration_beat = offset_beat - onset_beat
+        onset_beat = float(get_beat(n['onset_time']))
+        offset_beat = float(get_beat(n['offset_time']))
+        duration_beat = max(0.01, offset_beat - onset_beat)
         
         # Snap onset to grid
         snap_onset = round(onset_beat * grid) / grid
@@ -417,7 +435,9 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
         elements_by_offset = {}
         for el in list(part.recurse()):
             if isinstance(el, (note.Note, chord.Chord)):
-                elements_by_offset.setdefault(el.offset, []).append(el)
+                # ARREDONDAMENTO CRUCIAL: Impede que desvios de ponto flutuante do music21 separem acordes perfeitos e apaguem notas!
+                rounded_offset = round(float(el.offset), 3)
+                elements_by_offset.setdefault(rounded_offset, []).append(el)
                 part.remove(el)
                 
         if not elements_by_offset:
@@ -515,8 +535,14 @@ def post_process_and_save_midi(
     # Apply pedal-to-duration to merge sustained notes
     clean_note_events = apply_pedal_to_durations(clean_note_events, est_pedal_events)
     
+    # Fetch beat_times_sec if available in output_dict
+    beat_times_sec = output_dict.get('beat_times_sec', None)
+    
     # Pre-quantize and clean up legato overlaps and small silence gaps
-    cleaned_note_events = quantize_and_clean_events(clean_note_events, bpm, allow_triplets=allow_triplets, time_signature=time_signature)
+    cleaned_note_events = quantize_and_clean_events(
+        clean_note_events, bpm, allow_triplets=allow_triplets, 
+        time_signature=time_signature, beat_times_sec=beat_times_sec
+    )
     
     # Pedal events scaling
     scale_ratio = bpm / 120.0
@@ -566,6 +592,13 @@ def transcribe_audio_to_raw_midi(
     print("Running ByteDance Onsets & Frames transcription...")
     transcribed_dict = transcriptor.transcribe(audio, None) # don't write midi from internal method
     output_dict = transcribed_dict['output_dict']
+    
+    print("Extracting tempo map (beat track)...")
+    import librosa
+    _, beat_frames = librosa.beat.beat_track(y=audio, sr=sample_rate)
+    beat_times_sec = librosa.frames_to_time(beat_frames, sr=sample_rate)
+    if len(beat_times_sec) >= 2:
+        output_dict['beat_times_sec'] = beat_times_sec
     
     # Save raw activations (sigmoids) to compressed NPZ file
     print(f"Saving neural activations to {output_dict_path}...")
@@ -641,9 +674,16 @@ def quantize_and_export(
         quarterLengthDivisors=divisors
     )
     
+    print("Running Krumhansl-Schmuckler Key Analysis...")
+    flat_stream = score_stream.flatten()
+    best_key = flat_stream.analyze('key')
+    print(f"Estimated Key: {best_key}")
+    
+    # We insert the key signature at offset 0 so it correctly spells the notes
+    flat_stream.insert(0, best_key)
+    
     # Split into Treble and Bass staves (Grand Staff) using the custom split_point
     print(f"Splitting quantized stream with time signature {time_signature}, tempo {bpm} BPM, and split boundary {split_point}...")
-    flat_stream = score_stream.flatten()
     split_score = split_piano_grand_staff(flat_stream, time_signature=time_signature, bpm=bpm, split_point=split_point)
     
     print("Making well-formed notation with measures and ties...")
