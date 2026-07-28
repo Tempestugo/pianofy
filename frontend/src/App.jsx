@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay';
+import DynamicEngineV2 from './components/DynamicEngineV2';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'; // Uses env variable on Vercel, defaults to local
 
@@ -57,7 +58,9 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [viewMode, setViewMode] = useState('animation'); // 'animation' (OneLine) vs 'pages' (PageFormat)
   const [speedFactor, setSpeedFactor] = useState(1.0);
+  const [activeEngine, setActiveEngine] = useState('classic');
   
+  const virtualAudioRef = useRef({ currentTime: 0 });
   const audioCtxRef = useRef(null);
   const scheduledNoteIndicesRef = useRef(new Set());
   const playbackStartTimeRef = useRef(0);
@@ -79,8 +82,10 @@ export default function App() {
   const streamRef = useRef(null);
   const audioStreamDestRef = useRef(null);
   const renderCanvasRef = useRef(null);
+  const dynamicEngineRef = useRef(null);
   const cameraXRef = useRef(0);
   const cameraYRef = useRef(0);
+  const svgDimsRef = useRef({ width: 0, height: 0 });
   const bgImageRef = useRef(null);
   const fgImageRef = useRef(null);
 
@@ -452,14 +457,18 @@ export default function App() {
         // Segment playheadMap into systems (rows of staves)
         const systems = [];
         let currentSys = null;
-        playheadMap.forEach(entry => {
+        playheadMap.forEach((entry, idx) => {
           const entryHeight = entry.height || 150;
           if (!currentSys) {
             currentSys = { minY: entry.y, maxY: entry.y + entryHeight, beats: [entry.beat], entries: [entry] };
             systems.push(currentSys);
           } else {
-            // System boundary check (significant Y jump or wrap-around in X coordinate)
-            const isNewSystem = (entry.y > currentSys.maxY + 120) || (entry.x < currentSys.entries[currentSys.entries.length - 1].x - 200);
+            const prevEntry = playheadMap[idx - 1];
+            // System boundary check:
+            // 1. Significant Y jump (at least 60px below the maxY of current system)
+            // 2. Significant X wrap (moved left by more than 150px)
+            const isNewSystem = (entry.y > currentSys.maxY + 60) || (prevEntry && prevEntry.x - entry.x > 150);
+            
             if (isNewSystem) {
               currentSys = { minY: entry.y, maxY: entry.y + entryHeight, beats: [entry.beat], entries: [entry] };
               systems.push(currentSys);
@@ -499,15 +508,34 @@ export default function App() {
         const elRect = el.getBoundingClientRect();
         const elX = elRect.left - containerRect.left + container.scrollLeft;
         const elY = elRect.top - containerRect.top + container.scrollTop;
+        const rightX = elRect.right - containerRect.left + container.scrollLeft;
         
-        // Find which system row this element belongs to
-        const systemIdx = systems.findIndex(sys => elY >= sys.minY - 50 && elY <= sys.maxY + 50);
+        // Find which system row this element belongs to by finding the closest vertical center
+        let bestSysIdx = 0;
+        let minDist = 99999;
+        systems.forEach((sys, idx) => {
+          const sysCenter = (sys.minY + sys.maxY) / 2;
+          const dist = Math.abs(elY - sysCenter);
+          if (dist < minDist) {
+            minDist = dist;
+            bestSysIdx = idx;
+          }
+        });
+        const systemIdx = bestSysIdx;
         
         // Hide notes immediately so they only appear exactly when played
         el.style.opacity = '0';
         el.style.transition = 'none'; // Instant pop (no fade-in)
         
-        cachedVf.push({ el, x: elX, y: elY, systemIdx });
+        cachedVf.push({ 
+          el, 
+          x: elX, 
+          y: elY,
+          rightX,
+          width: elRect.width,
+          height: elRect.height,
+          systemIdx 
+        });
       });
       
       vfElementsRef.current = cachedVf;
@@ -622,20 +650,29 @@ export default function App() {
           // A note is in the future if it's on a future system row, or ahead of the playhead on the current row
           vfElementsRef.current.forEach(item => {
             let isFuture = false;
-            if (item.systemIdx !== -1) {
-              if (item.systemIdx > activeSystemIdx) {
-                isFuture = true;
-              } else if (item.systemIdx === activeSystemIdx) {
-                isFuture = item.x > playheadX + 4;
-              } else {
-                isFuture = false;
-              }
-            } else {
-              // Fallback Y-check if outside defined systems
+            let isPast = false;
+            
+            if (activeEngine === 'classic') {
+              // Classic wipe animation (smooth sweep)
               isFuture = (item.y > playheadY + 40) || (Math.abs(item.y - playheadY) <= 40 && item.x > playheadX + 4);
+              isPast = (item.y < playheadY - 40); // System já passou, deve apagar!
+            } else {
+              if (item.systemIdx !== -1) {
+                if (item.systemIdx > activeSystemIdx) {
+                  isFuture = true;
+                } else if (item.systemIdx === activeSystemIdx) {
+                  isFuture = item.x > playheadX + 4;
+                } else {
+                  isPast = true; // System já passou, deve apagar!
+                }
+              } else {
+                // Fallback Y-check if outside defined systems
+                isFuture = (item.y > playheadY + 40) || (Math.abs(item.y - playheadY) <= 40 && item.x > playheadX + 4);
+                isPast = (item.y < playheadY - 40);
+              }
             }
             
-            if (isFuture) {
+            if (isFuture || isPast) {
               item.el.style.opacity = '0';
             } else {
               item.el.style.opacity = '1';
@@ -647,60 +684,158 @@ export default function App() {
             const canvas = renderCanvasRef.current;
             const canvasCtx = canvas.getContext('2d');
             
-            // Draw background parchment color
-            canvasCtx.fillStyle = '#ffffff';
-            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-            
+            // Common camera zoom & pan logic (Applies to BOTH engines for smooth video)
             canvasCtx.save();
-            
-            // Apply optical zoom
             const videoScale = 1.4;
             canvasCtx.translate(canvas.width / 2, canvas.height / 2);
             canvasCtx.scale(videoScale, videoScale);
             canvasCtx.translate(-canvas.width / 2, -canvas.height / 2);
             
-            // Translate the canvas to center the absolute playhead
             const exactCameraX = playheadX;
             const smoothedPlayheadY = cameraYRef.current + (containerRect.height / 2);
             const videoOffsetX = (canvas.width / 2) - exactCameraX;
             const videoOffsetY = (canvas.height / 2) - smoothedPlayheadY;
             
-            canvasCtx.translate(videoOffsetX, videoOffsetY);
-            
-            // 1. Draw background staves (always 100% visible)
-            canvasCtx.drawImage(bgImageRef.current, 0, 0);
-            
-            // 2. Create system-aware clipping mask for foreground notes
-            canvasCtx.save();
-            canvasCtx.beginPath();
-            
-            for (let i = 0; i < systems.length; i++) {
-              const sys = systems[i];
-              const top = sys.minY - 50;
-              const bottom = sys.maxY + 50;
-              const height = bottom - top;
+            if (activeEngine === 'classic') {
+              // Draw background parchment color (unzoomed)
+              canvasCtx.save();
+              canvasCtx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+              canvasCtx.fillStyle = '#ffffff';
+              canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+              canvasCtx.restore();
               
-              if (i < activeSystemIdx) {
-                // Past systems: fully reveal notes
-                canvasCtx.rect(0, top, 99999, height);
-              } else if (i === activeSystemIdx) {
-                // Current system: reveal up to playheadX + 60 to cover beams & flags fully without clipping
-                canvasCtx.rect(0, top, playheadX + 60, height);
+              // Apply camera
+              canvasCtx.translate(videoOffsetX, videoOffsetY);
+              
+              // 1. Draw background staves
+              canvasCtx.drawImage(bgImageRef.current, 0, 0);
+              
+              // 2. Clipping mask wipe
+              canvasCtx.save();
+              canvasCtx.beginPath();
+              
+              for (let i = 0; i < systems.length; i++) {
+                const sys = systems[i];
+                const prevSys = systems[i - 1];
+                const nextSys = systems[i + 1];
+                const top = prevSys ? (sys.minY + prevSys.maxY) / 2 : sys.minY - 50;
+                const bottom = nextSys ? (sys.maxY + nextSys.minY) / 2 : sys.maxY + 50;
+                const height = bottom - top;
+                
+                if (i === activeSystemIdx) {
+                  canvasCtx.rect(0, top, playheadX + 60, height);
+                }
               }
-              // Future systems: stay hidden
+              
+              canvasCtx.clip();
+              canvasCtx.drawImage(fgImageRef.current, 0, 0);
+              canvasCtx.restore();
+              
+            } else {
+              // DYNAMIC ENGINE RECORDING (With optical zoom tracking!)
+              
+              // 1. Draw background gradient (unzoomed)
+              canvasCtx.save();
+              canvasCtx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform to fill screen
+              if (dynamicEngineRef.current) {
+                dynamicEngineRef.current.drawBackground(canvasCtx, canvas.width, canvas.height);
+              }
+              canvasCtx.restore();
+              
+              // Apply camera
+              canvasCtx.translate(videoOffsetX, videoOffsetY);
+              
+              // 2. Draw Inverted SVG 
+              canvasCtx.save();
+              canvasCtx.filter = 'invert(1) hue-rotate(180deg) brightness(1.2) contrast(1.1)';
+              canvasCtx.globalCompositeOperation = 'screen';
+              
+              // HIGH PERFORMANCE DRAW: Slice only the visible portion of the massive canvas!
+              const sx = Math.max(0, -videoOffsetX);
+              const sy = Math.max(0, -videoOffsetY);
+              const sw = Math.min(bgImageRef.current.width - sx, canvas.width / (videoScale || 1) + 100);
+              const sh = Math.min(bgImageRef.current.height - sy, canvas.height / (videoScale || 1) + 100);
+              
+              if (sw > 0 && sh > 0) {
+                canvasCtx.drawImage(bgImageRef.current, sx, sy, sw, sh, sx, sy, sw, sh);
+              }
+              
+              // Calculate the farthest visible note X coordinate for the active system
+              let farthestVisibleX = 0;
+              let nextNoteX = 99999;
+              
+              if (playheadMapRef.current) {
+                for (let i = 0; i < playheadMapRef.current.length; i++) {
+                  const entry = playheadMapRef.current[i];
+                  const sys = systems[activeSystemIdx];
+                  if (sys && entry.y >= sys.minY - 10 && entry.y <= sys.maxY + 10) {
+                    if (entry.x <= playheadX + 25) { // Pop the note in exactly when the bar approaches it!
+                      if (entry.x > farthestVisibleX) {
+                        farthestVisibleX = entry.x;
+                      }
+                    } else {
+                      // It's a future note on the same system! 
+                      if (entry.x > farthestVisibleX && entry.x < nextNoteX) {
+                        nextNoteX = entry.x;
+                      }
+                    }
+                  }
+                }
+              }
+              
+              // Apply snapping clipping mask so notes POP IN instantly as complete blocks
+              canvasCtx.save();
+              canvasCtx.beginPath();
+              
+              for (let i = 0; i < systems.length; i++) {
+                const sys = systems[i];
+                const prevSys = systems[i - 1];
+                const nextSys = systems[i + 1];
+                const top = prevSys ? (sys.minY + prevSys.maxY) / 2 : sys.minY - 50;
+                const bottom = nextSys ? (sys.maxY + nextSys.minY) / 2 : sys.maxY + 50;
+                const height = bottom - top;
+                
+                if (i === activeSystemIdx) {
+                  // Dynamically calculate the clipping mask boundary to avoid slicing notes!
+                  // It guarantees to reveal the current note without bleeding into the next note's accidentals.
+                  let revealX = 120;
+                  if (farthestVisibleX > 0) {
+                    if (nextNoteX !== 99999) {
+                      // Safe dynamic midpoint logic: give current note minimum 25px, but stop 20px before next note
+                      revealX = Math.max(farthestVisibleX + 25, nextNoteX - 20);
+                    } else {
+                      // Last note in system, give generous padding
+                      revealX = farthestVisibleX + 50;
+                    }
+                  }
+                  
+                  canvasCtx.rect(0, top, revealX, height);
+                }
+              }
+              
+              canvasCtx.clip();
+              if (sw > 0 && sh > 0) {
+                canvasCtx.drawImage(fgImageRef.current, sx, sy, sw, sh, sx, sy, sw, sh);
+              }
+              canvasCtx.restore(); // Restore clip
+              
+              canvasCtx.restore(); // Restore filter/blend
+              
+              // 3. Draw Particles and Glows (Absolute world coordinates!)
+              canvasCtx.save();
+              canvasCtx.globalCompositeOperation = 'screen';
+              if (dynamicEngineRef.current) {
+                dynamicEngineRef.current.drawOverlay(canvasCtx);
+              }
+              canvasCtx.restore();
             }
             
-            canvasCtx.clip();
-            
-            // 3. Draw foreground notes (clipped by mask)
-            canvasCtx.drawImage(fgImageRef.current, 0, 0);
-            
-            canvasCtx.restore(); // Restore clip
-            canvasCtx.restore(); // Restore zoom/translation
+            canvasCtx.restore(); // Restore global scale/translation
           }
         }
         
         // Stop check
+        virtualAudioRef.current.currentTime = elapsedSec;
         const isPastAudioDuration = audioDuration && (elapsedSec >= audioDuration);
         const lastBeat = notes[notes.length - 1]?.onset_beat || 0;
         const isPastLastBeat = elapsedBeats > lastBeat + 2.0;
@@ -723,6 +858,7 @@ export default function App() {
 
   const stopPlayback = () => {
     setIsPlaying(false);
+    virtualAudioRef.current.currentTime = 0;
     if (playbackAnimFrameRef.current) {
       cancelAnimationFrame(playbackAnimFrameRef.current);
       playbackAnimFrameRef.current = null;
@@ -764,7 +900,7 @@ export default function App() {
       
       // 2. Prepare Video Stream (Hidden Canvas)
       const canvas = document.createElement('canvas');
-      canvas.width = 1280;
+      canvas.width = 1280; // 720p coordinates exactly match logical DOM coordinates
       canvas.height = 720;
       
       // CRITICAL FIX: Browsers heavily throttle requestAnimationFrame and Canvas updates for off-DOM or off-screen elements.
@@ -780,7 +916,7 @@ export default function App() {
       
       renderCanvasRef.current = canvas;
       
-      // Ensure smooth video framerate
+      // Keep framerate at 30fps to avoid stuttering/freezing
       const videoStream = canvas.captureStream(30);  
       
       // 3. Combine Streams
@@ -792,8 +928,8 @@ export default function App() {
       streamRef.current = combinedStream;
       recordedChunksRef.current = [];
       
-      // Try to use a standard webm codec that works without screen sharing constraints
-      const options = { mimeType: 'video/webm' };
+      // Use standard webm with extreme bitrate to ensure absolute high quality and no blurring
+      const options = { mimeType: 'video/webm', videoBitsPerSecond: 12000000 };
       const recorder = new MediaRecorder(combinedStream, options);
       
       recorder.ondataavailable = (e) => {
@@ -825,7 +961,7 @@ export default function App() {
       };
       
       mediaRecorderRef.current = recorder;
-      recorder.start(100); // Collect data chunks frequently to avoid memory bloat
+      recorder.start(250); // Slightly larger timeslice (250ms) to reduce chunking overhead on the CPU
       setIsRecording(true);
       
       // Force explicit dimensions so XMLSerializer doesn't lose the viewport framing
@@ -851,7 +987,13 @@ export default function App() {
         const bgUrl = URL.createObjectURL(bgBlob);
         const bgImg = new Image();
         bgImg.onload = () => {
-          bgImageRef.current = bgImg;
+          // RASTERIZE ONCE TO OFFSCREEN CANVAS FOR MASSIVE PERFORMANCE BOOST
+          const offscreen = document.createElement('canvas');
+          offscreen.width = svgRect.width;
+          offscreen.height = svgRect.height;
+          const offCtx = offscreen.getContext('2d');
+          offCtx.drawImage(bgImg, 0, 0);
+          bgImageRef.current = offscreen;
           URL.revokeObjectURL(bgUrl);
         };
         bgImg.src = bgUrl;
@@ -864,7 +1006,13 @@ export default function App() {
         const fgUrl = URL.createObjectURL(fgBlob);
         const fgImg = new Image();
         fgImg.onload = () => {
-          fgImageRef.current = fgImg;
+          // RASTERIZE ONCE TO OFFSCREEN CANVAS FOR MASSIVE PERFORMANCE BOOST
+          const offscreen = document.createElement('canvas');
+          offscreen.width = svgRect.width;
+          offscreen.height = svgRect.height;
+          const offCtx = offscreen.getContext('2d');
+          offCtx.drawImage(fgImg, 0, 0);
+          fgImageRef.current = offscreen;
           URL.revokeObjectURL(fgUrl);
         };
         fgImg.src = fgUrl;
@@ -1582,7 +1730,9 @@ export default function App() {
                       fontWeight: 600
                     }}
                   >
-                    <option value="0.5">0.5x (Treinar)</option>
+                    <option value="0.1">0.10x (Ultra Render)</option>
+                    <option value="0.25">0.25x (Super Lento)</option>
+                    <option value="0.5">0.50x (Treinar)</option>
                     <option value="0.75">0.75x</option>
                     <option value="1.0">1.0x (Padrão)</option>
                     <option value="1.25">1.25x</option>
@@ -1595,22 +1745,50 @@ export default function App() {
 
           </div>
           
-          <div style={{ position: 'relative', width: '100%' }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, background: 'rgba(15,10,8,0.6)', padding: 6, borderRadius: 12, border: '1px solid rgba(197,160,89,0.15)' }}>
+            <EngineToggle active={activeEngine === 'classic'} onClick={() => setActiveEngine('classic')} icon={<FileMusic size={15} />} label="Motor Clássico" />
+            <EngineToggle active={activeEngine === 'dynamic'} onClick={() => setActiveEngine('dynamic')} icon={<Eye size={15} />} label="Partitura Dinâmica" />
+          </div>
+          
+          <div style={{ position: 'relative', width: '100%', height: '420px', display: hasScoreRendered && !errorMsg ? 'block' : 'none' }}>
+            {activeEngine === 'dynamic' && notesDataRef.current && (
+               <DynamicEngineV2 
+                 ref={dynamicEngineRef}
+                 notes={notesDataRef.current.notes.map(n => {
+                   const beatDuration = 60 / notesDataRef.current.bpm;
+                   return {
+                     ...n,
+                     onset_time: (n.onset_beat * beatDuration) / speedFactor,
+                     offset_time: ((n.onset_beat + n.duration_beat) * beatDuration) / speedFactor
+                   };
+                 })} 
+                 audioRef={virtualAudioRef}
+                 osmdContainerRef={osmdContainerRef}
+                 playheadMapRef={playheadMapRef}
+               />
+            )}
+            
             <div 
               id="osmd-container" 
               className="osmd-container"
               ref={osmdContainerRef}
               style={{ 
-                display: hasScoreRendered && !errorMsg ? 'block' : 'none',
                 width: '100%',
-                height: '420px',
+                height: '100%',
                 overflowX: 'auto',
                 overflowY: 'auto',
                 padding: '24px 16px',
                 borderRadius: '12px',
                 border: '1px solid rgba(255, 255, 255, 0.05)',
                 boxShadow: 'inset 0 0 20px rgba(0,0,0,0.05)',
-                scrollBehavior: 'smooth'
+                scrollBehavior: 'smooth',
+                filter: activeEngine === 'dynamic' ? 'invert(1) hue-rotate(180deg) brightness(1.2) contrast(1.1)' : 'none',
+                mixBlendMode: activeEngine === 'dynamic' ? 'screen' : 'normal',
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                zIndex: 1,
+                transition: 'filter 0.5s ease-in-out',
               }}
             ></div>
           </div>
@@ -1639,5 +1817,19 @@ export default function App() {
         <p>© 2026 Pianofy App. Desenvolvido com Google Magenta's Onsets & Frames & music21.</p>
       </footer>
     </div>
+  );
+}
+
+function EngineToggle({ active, onClick, icon, label }) {
+  return (
+    <button onClick={onClick} style={{
+      flex: 1, padding: '10px 14px', borderRadius: 8, border: 'none', cursor: 'pointer',
+      fontWeight: 600, fontSize: '0.85rem', transition: 'all 0.2s',
+      background: active ? 'linear-gradient(135deg, #c5a059, #9e7931)' : 'transparent',
+      color: active ? '#1a0f0a' : '#ebd08f',
+      boxShadow: active ? '0 2px 8px rgba(197,160,89,0.3)' : 'none'
+    }}>
+      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>{icon} {label}</span>
+    </button>
   );
 }
