@@ -10,3 +10,4 @@ torch
 torchvision
 piano-transcription-inference
 music21==9.1.0
+setuptools==69.5.1
