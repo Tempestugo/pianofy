@@ -1,6 +1,10 @@
 import os
 import uuid
 import traceback
+import imageio_ffmpeg
+
+# Auto-configure static FFmpeg path on Windows for audioread / librosa
+os.environ["PATH"] += os.pathsep + os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
