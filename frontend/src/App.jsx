@@ -16,9 +16,12 @@ import {
   Eye,
   Video
 } from 'lucide-react';
-import confetti from 'canvas-confetti';
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay';
 import DynamicEngineV2 from './components/DynamicEngineV2';
+import BlenderRenderView from './components/BlenderRenderView';
+import NativeCinematicRenderView from './components/NativeCinematicRenderView';
+import { Sparkles, Film } from 'lucide-react';
+import confetti from 'canvas-confetti';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'; // Uses env variable on Vercel, defaults to local
 
@@ -199,40 +202,46 @@ export default function App() {
         setTaskProgress(data.progress);
         setStatusMessage(data.message);
         
+        let isSuccess = false;
         if (data.status === 'SUCCESS') {
           clearInterval(interval);
           setIsTranscribing(false);
-          // Set dynamic values from backend calibration
-          setConfidence(data.confidence_threshold);
-          setMinDuration(data.min_duration_ms);
-          if (data.time_signature) setTimeSignature(data.time_signature);
-          if (data.bpm) {
-            setBpm(Math.round(data.bpm));
-            setBpmMode('manual');
+          isSuccess = true;
+          try {
+            // Set dynamic values from backend calibration
+            if (data.confidence_threshold !== undefined) setConfidence(data.confidence_threshold);
+            if (data.min_duration_ms !== undefined) setMinDuration(data.min_duration_ms);
+            if (data.time_signature) setTimeSignature(data.time_signature);
+            if (data.bpm) {
+              setBpm(Math.round(data.bpm));
+              setBpmMode('manual');
+            }
+            if (data.split_point) {
+              setSplitPoint(data.split_point);
+            }
+            if (data.filter_slips !== undefined) {
+              setFilterSlips(data.filter_slips);
+            }
+            if (data.allow_triplets !== undefined) {
+              setAllowTriplets(data.allow_triplets);
+            }
+            if (data.audio_duration) {
+              setAudioDuration(data.audio_duration);
+            }
+            triggerConfetti();
+            setTimeout(() => {
+              renderScore(taskId || data.task_id);
+            }, 100);
+          } catch (innerErr) {
+            console.warn("Non-fatal error in post-success setup:", innerErr);
           }
-          if (data.split_point) {
-            setSplitPoint(data.split_point);
-          }
-          if (data.filter_slips !== undefined) {
-            setFilterSlips(data.filter_slips);
-          }
-          if (data.allow_triplets !== undefined) {
-            setAllowTriplets(data.allow_triplets);
-          }
-          if (data.audio_duration) {
-            setAudioDuration(data.audio_duration);
-          }
-          triggerConfetti();
-          setTimeout(() => {
-            renderScore(taskId || data.task_id);
-          }, 100);
         } else if (data.status === 'FAILED') {
           clearInterval(interval);
           setIsTranscribing(false);
           setErrorMsg(data.message);
         }
       } catch (err) {
-        console.error(err);
+        console.error("Polling error:", err);
         clearInterval(interval);
         setIsTranscribing(false);
         setTaskStatus('FAILED');
@@ -245,12 +254,18 @@ export default function App() {
 
   // Trigger celebration confetti
   const triggerConfetti = () => {
-    confetti({
-      particleCount: 150,
-      spread: 80,
-      origin: { y: 0.6 },
-      colors: ['#c5a059', '#eae0ce', '#9e2c2c'] // Gold, Ivory, Felt Red
-    });
+    try {
+      if (typeof confetti === 'function') {
+        confetti({
+          particleCount: 150,
+          spread: 80,
+          origin: { y: 0.6 },
+          colors: ['#c5a059', '#eae0ce', '#9e2c2c'] // Gold, Ivory, Felt Red
+        });
+      }
+    } catch (e) {
+      console.warn("Could not trigger confetti animation:", e);
+    }
   };
 
   // Load and render sheet music using OSMD
@@ -1745,53 +1760,61 @@ export default function App() {
 
           </div>
           
-          <div style={{ display: 'flex', gap: 8, marginBottom: 16, background: 'rgba(15,10,8,0.6)', padding: 6, borderRadius: 12, border: '1px solid rgba(197,160,89,0.15)' }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, background: 'rgba(15,10,8,0.6)', padding: 6, borderRadius: 12, border: '1px solid rgba(197,160,89,0.15)', flexWrap: 'wrap' }}>
+            <EngineToggle active={activeEngine === 'cinematic2d'} onClick={() => setActiveEngine('cinematic2d')} icon={<Film size={15} />} label="Partitura Cinemática (HD)" />
             <EngineToggle active={activeEngine === 'classic'} onClick={() => setActiveEngine('classic')} icon={<FileMusic size={15} />} label="Motor Clássico" />
             <EngineToggle active={activeEngine === 'dynamic'} onClick={() => setActiveEngine('dynamic')} icon={<Eye size={15} />} label="Partitura Dinâmica" />
+            <EngineToggle active={activeEngine === 'blender3d'} onClick={() => setActiveEngine('blender3d')} icon={<Sparkles size={15} />} label="Partitura 3D (Blender)" />
           </div>
           
-          <div style={{ position: 'relative', width: '100%', height: '420px', display: hasScoreRendered && !errorMsg ? 'block' : 'none' }}>
-            {activeEngine === 'dynamic' && notesDataRef.current && (
-               <DynamicEngineV2 
-                 ref={dynamicEngineRef}
-                 notes={notesDataRef.current.notes.map(n => {
-                   const beatDuration = 60 / notesDataRef.current.bpm;
-                   return {
-                     ...n,
-                     onset_time: (n.onset_beat * beatDuration) / speedFactor,
-                     offset_time: ((n.onset_beat + n.duration_beat) * beatDuration) / speedFactor
-                   };
-                 })} 
-                 audioRef={virtualAudioRef}
-                 osmdContainerRef={osmdContainerRef}
-                 playheadMapRef={playheadMapRef}
-               />
-            )}
-            
-            <div 
-              id="osmd-container" 
-              className="osmd-container"
-              ref={osmdContainerRef}
-              style={{ 
-                width: '100%',
-                height: '100%',
-                overflowX: 'auto',
-                overflowY: 'auto',
-                padding: '24px 16px',
-                borderRadius: '12px',
-                border: '1px solid rgba(255, 255, 255, 0.05)',
-                boxShadow: 'inset 0 0 20px rgba(0,0,0,0.05)',
-                scrollBehavior: 'smooth',
-                filter: activeEngine === 'dynamic' ? 'invert(1) hue-rotate(180deg) brightness(1.2) contrast(1.1)' : 'none',
-                mixBlendMode: activeEngine === 'dynamic' ? 'screen' : 'normal',
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                zIndex: 1,
-                transition: 'filter 0.5s ease-in-out',
-              }}
-            ></div>
-          </div>
+          {activeEngine === 'cinematic2d' ? (
+            <NativeCinematicRenderView taskId={taskId} />
+          ) : activeEngine === 'blender3d' ? (
+            <BlenderRenderView taskId={taskId} />
+          ) : (
+            <div style={{ position: 'relative', width: '100%', height: '420px', display: hasScoreRendered && !errorMsg ? 'block' : 'none' }}>
+              {activeEngine === 'dynamic' && notesDataRef.current && (
+                 <DynamicEngineV2 
+                   ref={dynamicEngineRef}
+                   notes={notesDataRef.current.notes.map(n => {
+                     const beatDuration = 60 / notesDataRef.current.bpm;
+                     return {
+                       ...n,
+                       onset_time: (n.onset_beat * beatDuration) / speedFactor,
+                       offset_time: ((n.onset_beat + n.duration_beat) * beatDuration) / speedFactor
+                     };
+                   })} 
+                   audioRef={virtualAudioRef}
+                   osmdContainerRef={osmdContainerRef}
+                   playheadMapRef={playheadMapRef}
+                 />
+              )}
+              
+              <div 
+                id="osmd-container" 
+                className="osmd-container"
+                ref={osmdContainerRef}
+                style={{ 
+                  width: '100%',
+                  height: '100%',
+                  overflowX: 'auto',
+                  overflowY: 'auto',
+                  padding: '24px 16px',
+                  borderRadius: '12px',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  boxShadow: 'inset 0 0 20px rgba(0,0,0,0.05)',
+                  scrollBehavior: 'smooth',
+                  filter: activeEngine === 'dynamic' ? 'invert(1) hue-rotate(180deg) brightness(1.2) contrast(1.1)' : 'none',
+                  mixBlendMode: activeEngine === 'dynamic' ? 'screen' : 'normal',
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  zIndex: 1,
+                  transition: 'filter 0.5s ease-in-out',
+                }}
+              ></div>
+            </div>
+          )}
           
           {!hasScoreRendered && !errorMsg && (
             <div className="osmd-loading">

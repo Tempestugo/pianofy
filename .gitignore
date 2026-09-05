@@ -6,3 +6,7 @@ __pycache__/
 backend/uploads/
 backend/outputs/
 .env
+*.m4a
+*.mp3
+*.wav
+desktop.ini
