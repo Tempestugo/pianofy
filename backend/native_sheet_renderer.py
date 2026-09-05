@@ -167,34 +167,62 @@ def render_ethereal_score_video(
                         if staff_key not in staves_data:
                             staves_data[staff_key] = []
                         for n in st_elem.iter("{http://www.w3.org/2000/svg}g"):
-                            if "note" in (n.get("class") or ""):
+                            if (n.get("class") or "").strip() == "note" or " note " in f" {n.get('class')} ":
                                 nid = n.get("id")
-                                if nid in note_intervals:
-                                    for u in n.iter("{http://www.w3.org/2000/svg}use"):
-                                        tr_m = re.search(r"translate\((\d+),\s*(\d+)\)", u.get("transform", ""))
-                                        if tr_m:
-                                            nx = (margin_x + float(tr_m.group(1))) * scale_x
-                                            ny = (margin_y + float(tr_m.group(2))) * scale_y
-                                            acc_x = None
-                                            for acc in n.iter("{http://www.w3.org/2000/svg}g"):
-                                                if "accid" in (acc.get("class") or ""):
-                                                    for acc_u in acc.iter("{http://www.w3.org/2000/svg}use"):
-                                                        acc_m = re.search(r"translate\((\d+),\s*(\d+)\)", acc_u.get("transform", ""))
-                                                        if acc_m:
-                                                            acc_x = (margin_x + float(acc_m.group(1))) * scale_x
-                                                            break
-                                            note_obj = {
-                                                "id": nid,
-                                                "x": nx,
-                                                "y": ny,
-                                                "acc_x": acc_x,
-                                                "on_ms": note_intervals[nid][0],
-                                                "off_ms": note_intervals[nid][1],
-                                                "staff": staff_key
-                                            }
-                                            staves_data[staff_key].append(note_obj)
-                                            sys_notes.append(note_obj)
-                                            page_notes.append(note_obj)
+                                if not nid or nid not in note_intervals:
+                                    continue
+                                
+                                nh_list = [h for h in n.iter("{http://www.w3.org/2000/svg}g") if "notehead" in (h.get("class") or "")]
+                                if not nh_list:
+                                    continue
+                                nh_u = list(nh_list[0].iter("{http://www.w3.org/2000/svg}use"))
+                                if not nh_u:
+                                    continue
+                                tr_m = re.search(r"translate\((\d+),\s*(\d+)\)", nh_u[0].get("transform", ""))
+                                if not tr_m:
+                                    continue
+                                
+                                nx = (margin_x + float(tr_m.group(1))) * scale_x
+                                ny = (margin_y + float(tr_m.group(2))) * scale_y
+
+                                acc_x = None
+                                acc_list = [a for a in n.iter("{http://www.w3.org/2000/svg}g") if "accid" in (a.get("class") or "")]
+                                if acc_list:
+                                    acc_u = list(acc_list[0].iter("{http://www.w3.org/2000/svg}use"))
+                                    if acc_u:
+                                        acc_tr = re.search(r"translate\((\d+),\s*(\d+)\)", acc_u[0].get("transform", ""))
+                                        if acc_tr:
+                                            acc_x = (margin_x + float(acc_tr.group(1))) * scale_x
+
+                                stem_x = None
+                                stem_list = [st for st in n.iter("{http://www.w3.org/2000/svg}g") if "stem" in (st.get("class") or "")]
+                                if stem_list:
+                                    stem_p = list(stem_list[0].iter("{http://www.w3.org/2000/svg}path"))
+                                    if stem_p:
+                                        stem_d = stem_p[0].get("d", "")
+                                        sm = re.search(r"M(\d+)", stem_d)
+                                        if sm:
+                                            stem_x = (margin_x + float(sm.group(1))) * scale_x
+
+                                nh_width = 10.0
+                                left_bound = (acc_x - 3.0) if acc_x is not None else (nx - 2.0)
+                                right_bound = max(nx + nh_width, stem_x + 2.0 if stem_x is not None else nx + nh_width)
+
+                                note_obj = {
+                                    "id": nid,
+                                    "x": nx,
+                                    "y": ny,
+                                    "acc_x": acc_x,
+                                    "stem_x": stem_x,
+                                    "left_x": left_bound,
+                                    "right_x": right_bound,
+                                    "on_ms": note_intervals[nid][0],
+                                    "off_ms": note_intervals[nid][1],
+                                    "staff": staff_key
+                                }
+                                staves_data[staff_key].append(note_obj)
+                                sys_notes.append(note_obj)
+                                page_notes.append(note_obj)
 
                 if sys_notes:
                     min_y = min(n["y"] for n in sys_notes)
@@ -213,7 +241,7 @@ def render_ethereal_score_video(
                         y0 = [n["y"] for n in staves_data[0]]
                         y1 = [n["y"] for n in staves_data[1]]
                         if max(y0) < min(y1):
-                            split_y = int((max(y0) + min(y1)) / 2.0)
+                            split_y = int((max(all_y0) + min(all_y1)) / 2.0) if 'all_y0' in locals() else int((max(y0) + min(y1)) / 2.0)
                         else:
                             split_y = int((min_y + max_y) / 2.0)
                         staff_strips[0] = (sys_top, split_y)
@@ -227,18 +255,17 @@ def render_ethereal_score_video(
                         s_notes = sorted(s_notes_list, key=lambda n: n["on_ms"])
                         events = []
                         for n in s_notes:
-                            left_x = n["acc_x"] if n["acc_x"] is not None else n["x"] - 14
-                            if not events or abs(n["on_ms"] - events[-1]["on_ms"]) > 20:
+                            if not events or abs(n["on_ms"] - events[-1]["on_ms"]) > 15:
                                 events.append({
                                     "on_ms": n["on_ms"],
                                     "notes": [n],
-                                    "min_x": min(left_x, n["x"] - 14),
-                                    "max_x": n["x"] + 14
+                                    "min_left": n["left_x"],
+                                    "max_right": n["right_x"]
                                 })
                             else:
                                 events[-1]["notes"].append(n)
-                                events[-1]["min_x"] = min(events[-1]["min_x"], left_x, n["x"] - 14)
-                                events[-1]["max_x"] = max(events[-1]["max_x"], n["x"] + 14)
+                                events[-1]["min_left"] = min(events[-1]["min_left"], n["left_x"])
+                                events[-1]["max_right"] = max(events[-1]["max_right"], n["right_x"])
                         staff_events[s_k] = events
 
                     page_systems.append({
@@ -413,7 +440,7 @@ def render_ethereal_score_video(
                     if not evs:
                         continue
                     if current_time_ms < evs[0]["on_ms"]:
-                        px = max(0, int(evs[0]["min_x"] - 6))
+                        px = max(0, int(evs[0]["min_left"] - 4))
                     elif current_time_ms >= evs[-1]["on_ms"]:
                         px = current_page["img_w"]
                     else:
@@ -422,7 +449,12 @@ def render_ethereal_score_video(
                             if evs[k]["on_ms"] <= current_time_ms < evs[k+1]["on_ms"]:
                                 last_k = k
                                 break
-                        px = min(int(evs[last_k]["max_x"] + 5), int(evs[last_k+1]["min_x"] - 6))
+                        curr_right = evs[last_k]["max_right"]
+                        next_left = evs[last_k+1]["min_left"]
+                        if curr_right + 2 < next_left - 1:
+                            px = int((curr_right + next_left) / 2.0)
+                        else:
+                            px = int(curr_right + 1)
                     page_comp[y_start:y_end, :px] = current_page["img_full"][y_start:y_end, :px]
 
         # Smooth camera tracking
@@ -440,10 +472,10 @@ def render_ethereal_score_video(
                 cam_x += (target_cam_x - cam_x) * 0.08
             cam_y += (target_cam_y - cam_y) * 0.06
 
-        # Camera shake driven by tension (subtle, dampened micro-tremor)
+        # Camera shake driven by tension (strictly 0.0 when calm, subtle micro-tremor in tension)
         shake_x, shake_y = 0.0, 0.0
-        if cur_tension > 0.35:
-            shake_mag = (cur_tension ** 2.2) * 2.8
+        if cur_tension > 0.45:
+            shake_mag = ((cur_tension - 0.45) / 0.55) ** 2.0 * 2.5
             shake_x = np.sin(frame_idx * 1.6) * shake_mag + np.cos(frame_idx * 2.8) * (shake_mag * 0.3)
             shake_y = np.cos(frame_idx * 1.9) * shake_mag + np.sin(frame_idx * 3.7) * (shake_mag * 0.25)
 
@@ -470,30 +502,30 @@ def render_ethereal_score_video(
                 blurred_score = cv2.blur(warped, (blur_amount, 1))
                 warped = cv2.addWeighted(warped, 0.65, blurred_score, 0.35, 0)
 
-        # Procedural Red Clouds (Crimson Nebula) background driven by agogics
-        # Drifting multi-octave noise
-        n1 = np.sin(grid_X * 1.5 + time_sec * 0.45) * np.cos(grid_Y * 1.8 - time_sec * 0.35)
-        n2 = np.sin(grid_X * 3.2 - time_sec * 0.75 + n1 * 0.8) * np.cos(grid_Y * 3.5 + time_sec * 0.55)
-        n3 = np.sin(grid_X * 6.1 + time_sec * 1.1) * np.cos(grid_Y * 6.2 - time_sec * 0.9)
-        cloud_raw = np.clip((n1 * 0.5 + n2 * 0.35 + n3 * 0.15 + 1.0) * 0.5, 0.0, 1.0)
+        # Procedural Nebula background: Calm Celestial Sapphire Blue -> Radiant Wine Crimson
+        n1 = np.sin(grid_X * 1.5 + time_sec * 0.35) * np.cos(grid_Y * 1.8 - time_sec * 0.25)
+        n2 = np.sin(grid_X * 3.2 - time_sec * 0.55 + n1 * 0.8) * np.cos(grid_Y * 3.5 + time_sec * 0.45)
+        cloud_raw = np.clip((n1 * 0.6 + n2 * 0.4 + 1.0) * 0.5, 0.0, 1.0)
         cloud_hd = cv2.resize(cloud_raw.astype(np.float32), (width, height), interpolation=cv2.INTER_CUBIC)
 
-        # Modulate color by tension: pure dark when calm -> deep wine -> radiant crimson when tense
-        cloud_power = float(np.power(cur_tension, 1.45))
-        if cloud_power < 0.02:
-            # Pure dark stage background when calm
-            bg_frame = np.zeros((height, width, 3), dtype=np.uint8)
-        else:
-            # Cinematic wine-crimson nebula clouds (calibrated to reference video)
-            cloud_r = np.clip((cloud_hd * 85.0 + 35.0) * cloud_power, 0, 255)
-            cloud_g = np.clip((cloud_hd * 22.0 + 2.0) * (cloud_power ** 1.2), 0, 255)
-            cloud_b = np.clip((cloud_hd * 36.0 + 4.0) * (cloud_power ** 1.2), 0, 255)
+        # Smooth blending weights between calm sapphire blue and intense wine crimson
+        w_calm = float((1.0 - cur_tension) ** 1.4)
+        w_tense = float(cur_tension ** 1.6)
+        w_sum = w_calm + w_tense
+        w_calm /= w_sum
+        w_tense /= w_sum
 
-            # Peripheral vignette keeping screen edges deep, cinematic and focused
-            cloud_r = (cloud_r * bg_vignette).astype(np.uint8)
-            cloud_g = (cloud_g * bg_vignette).astype(np.uint8)
-            cloud_b = (cloud_b * bg_vignette).astype(np.uint8)
-            bg_frame = cv2.merge([cloud_b, cloud_g, cloud_r])
+        # Blue palette when calm (R~12-18, G~30-38, B~95-110)
+        # Crimson wine palette when tense (R~120-160, G~20-25, B~35-45)
+        cloud_r = np.clip((cloud_hd * 18.0 + 8.0) * w_calm + (cloud_hd * 120.0 + 35.0) * w_tense, 0, 255)
+        cloud_g = np.clip((cloud_hd * 38.0 + 14.0) * w_calm + (cloud_hd * 24.0 + 2.0) * w_tense, 0, 255)
+        cloud_b = np.clip((cloud_hd * 110.0 + 45.0) * w_calm + (cloud_hd * 42.0 + 5.0) * w_tense, 0, 255)
+
+        # Peripheral vignette keeping screen edges deep and focused
+        cloud_r = (cloud_r * bg_vignette).astype(np.uint8)
+        cloud_g = (cloud_g * bg_vignette).astype(np.uint8)
+        cloud_b = (cloud_b * bg_vignette).astype(np.uint8)
+        bg_frame = cv2.merge([cloud_b, cloud_g, cloud_r])
 
         # Composite score with 2D spotlight vignette
         s_rgb = warped[:, :, :3].astype(np.float32)
