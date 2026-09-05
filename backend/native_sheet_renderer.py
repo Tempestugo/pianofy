@@ -93,7 +93,7 @@ def render_ethereal_score_video(
     # 4. Typography and Two-Layer Styles
     style_full = """
     <style>
-      path, polygon, rect { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
+      path, polygon, rect, use { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
       .notehead path, .notehead use { fill: #ffffff !important; }
       .staff path { stroke: #d0c4b4 !important; }
       .barLine path { stroke: #998a78 !important; }
@@ -106,7 +106,7 @@ def render_ethereal_score_video(
 
     style_staves = """
     <style>
-      path, polygon, rect { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
+      path, polygon, rect, use { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
       .staff path { stroke: #d0c4b4 !important; }
       .barLine path { stroke: #998a78 !important; }
       text, tspan { fill: #f0eae1 !important; stroke: none !important; }
@@ -156,25 +156,45 @@ def render_ethereal_score_video(
         for g in root.iter("{http://www.w3.org/2000/svg}g"):
             if g.get("class") == "system":
                 sys_id = g.get("id")
+                measures = [m for m in g.iter("{http://www.w3.org/2000/svg}g") if "measure" in (m.get("class") or "")]
+                staves_data = {}
                 sys_notes = []
-                for n in g.iter("{http://www.w3.org/2000/svg}g"):
-                    if n.get("class") == "note":
-                        nid = n.get("id")
-                        for u in n.iter("{http://www.w3.org/2000/svg}use"):
-                            m = re.search(r"translate\((\d+),\s*(\d+)\)", u.get("transform", ""))
-                            if m and nid in note_intervals:
-                                on_ms, off_ms = note_intervals[nid]
-                                nx = (margin_x + float(m.group(1))) * scale_x
-                                ny = (margin_y + float(m.group(2))) * scale_y
-                                note_obj = {
-                                    "id": nid,
-                                    "x": nx,
-                                    "y": ny,
-                                    "on_ms": on_ms,
-                                    "off_ms": off_ms
-                                }
-                                sys_notes.append(note_obj)
-                                page_notes.append(note_obj)
+
+                for m in measures:
+                    m_staves = [s for s in m if "staff" in (s.get("class") or "")]
+                    for s_idx, st_elem in enumerate(m_staves):
+                        staff_key = s_idx
+                        if staff_key not in staves_data:
+                            staves_data[staff_key] = []
+                        for n in st_elem.iter("{http://www.w3.org/2000/svg}g"):
+                            if "note" in (n.get("class") or ""):
+                                nid = n.get("id")
+                                if nid in note_intervals:
+                                    for u in n.iter("{http://www.w3.org/2000/svg}use"):
+                                        tr_m = re.search(r"translate\((\d+),\s*(\d+)\)", u.get("transform", ""))
+                                        if tr_m:
+                                            nx = (margin_x + float(tr_m.group(1))) * scale_x
+                                            ny = (margin_y + float(tr_m.group(2))) * scale_y
+                                            acc_x = None
+                                            for acc in n.iter("{http://www.w3.org/2000/svg}g"):
+                                                if "accid" in (acc.get("class") or ""):
+                                                    for acc_u in acc.iter("{http://www.w3.org/2000/svg}use"):
+                                                        acc_m = re.search(r"translate\((\d+),\s*(\d+)\)", acc_u.get("transform", ""))
+                                                        if acc_m:
+                                                            acc_x = (margin_x + float(acc_m.group(1))) * scale_x
+                                                            break
+                                            note_obj = {
+                                                "id": nid,
+                                                "x": nx,
+                                                "y": ny,
+                                                "acc_x": acc_x,
+                                                "on_ms": note_intervals[nid][0],
+                                                "off_ms": note_intervals[nid][1],
+                                                "staff": staff_key
+                                            }
+                                            staves_data[staff_key].append(note_obj)
+                                            sys_notes.append(note_obj)
+                                            page_notes.append(note_obj)
 
                 if sys_notes:
                     min_y = min(n["y"] for n in sys_notes)
@@ -183,6 +203,44 @@ def render_ethereal_score_video(
                     max_x = max(n["x"] for n in sys_notes)
                     start_ms = min(n["on_ms"] for n in sys_notes)
                     end_ms = max(n["off_ms"] for n in sys_notes)
+                    sys_top = max(0, int(min_y - 45))
+                    sys_bot = min(img_h, int(max_y + 45))
+
+                    # Compute vertical staff strips (Treble / Bass separation)
+                    staff_strips = {}
+                    num_staves = len(staves_data)
+                    if num_staves >= 2 and 0 in staves_data and 1 in staves_data and staves_data[0] and staves_data[1]:
+                        y0 = [n["y"] for n in staves_data[0]]
+                        y1 = [n["y"] for n in staves_data[1]]
+                        if max(y0) < min(y1):
+                            split_y = int((max(y0) + min(y1)) / 2.0)
+                        else:
+                            split_y = int((min_y + max_y) / 2.0)
+                        staff_strips[0] = (sys_top, split_y)
+                        staff_strips[1] = (split_y, sys_bot)
+                    else:
+                        staff_strips[0] = (sys_top, sys_bot)
+
+                    # Group notes into discrete onset events per staff
+                    staff_events = {}
+                    for s_k, s_notes_list in staves_data.items():
+                        s_notes = sorted(s_notes_list, key=lambda n: n["on_ms"])
+                        events = []
+                        for n in s_notes:
+                            left_x = n["acc_x"] if n["acc_x"] is not None else n["x"] - 14
+                            if not events or abs(n["on_ms"] - events[-1]["on_ms"]) > 20:
+                                events.append({
+                                    "on_ms": n["on_ms"],
+                                    "notes": [n],
+                                    "min_x": min(left_x, n["x"] - 14),
+                                    "max_x": n["x"] + 14
+                                })
+                            else:
+                                events[-1]["notes"].append(n)
+                                events[-1]["min_x"] = min(events[-1]["min_x"], left_x, n["x"] - 14)
+                                events[-1]["max_x"] = max(events[-1]["max_x"], n["x"] + 14)
+                        staff_events[s_k] = events
+
                     page_systems.append({
                         "id": sys_id,
                         "notes": sys_notes,
@@ -190,11 +248,13 @@ def render_ethereal_score_video(
                         "max_x": max_x,
                         "min_y": min_y,
                         "max_y": max_y,
-                        "top_y": max(0, int(min_y - 45)),
-                        "bottom_y": min(img_h, int(max_y + 45)),
+                        "top_y": sys_top,
+                        "bottom_y": sys_bot,
                         "center_y": (min_y + max_y) / 2.0,
                         "start_ms": start_ms,
-                        "end_ms": end_ms
+                        "end_ms": end_ms,
+                        "staff_strips": staff_strips,
+                        "staff_events": staff_events
                     })
 
         p_start_ms = min((n["on_ms"] for n in page_notes), default=0.0)
@@ -338,9 +398,8 @@ def render_ethereal_score_video(
             else:
                 playhead_x = float(active_sys["min_x"])
 
-        # Progressive note reveal (invisible line, notes appear at playhead)
+        # Progressive discrete note reveal ("picotada nota por nota")
         page_comp = current_page["img_staves"].copy()
-        feather = 16
         for s in current_page["systems"]:
             top = s["top_y"]
             bot = s["bottom_y"]
@@ -348,17 +407,23 @@ def render_ethereal_score_video(
                 # System completely finished: full reveal
                 page_comp[top:bot, :] = current_page["img_full"][top:bot, :]
             elif current_time_ms >= s["start_ms"]:
-                # Active system: reveal up to playhead_x with soft organic edge
-                px = int(playhead_x + 6)
-                page_comp[top:bot, :max(0, px - feather)] = current_page["img_full"][top:bot, :max(0, px - feather)]
-                for f_i in range(feather):
-                    col = px - feather + f_i
-                    if 0 <= col < current_page["img_w"]:
-                        a = f_i / float(feather)
-                        page_comp[top:bot, col] = (
-                            current_page["img_full"][top:bot, col] * a +
-                            current_page["img_staves"][top:bot, col] * (1.0 - a)
-                        ).astype(np.uint8)
+                # Active system: reveal staves independently at discrete note events
+                for sk, (y_start, y_end) in s["staff_strips"].items():
+                    evs = s["staff_events"].get(sk, [])
+                    if not evs:
+                        continue
+                    if current_time_ms < evs[0]["on_ms"]:
+                        px = max(0, int(evs[0]["min_x"] - 6))
+                    elif current_time_ms >= evs[-1]["on_ms"]:
+                        px = current_page["img_w"]
+                    else:
+                        last_k = 0
+                        for k in range(len(evs) - 1):
+                            if evs[k]["on_ms"] <= current_time_ms < evs[k+1]["on_ms"]:
+                                last_k = k
+                                break
+                        px = min(int(evs[last_k]["max_x"] + 5), int(evs[last_k+1]["min_x"] - 6))
+                    page_comp[y_start:y_end, :px] = current_page["img_full"][y_start:y_end, :px]
 
         # Smooth camera tracking
         target_cam_x = playhead_x
