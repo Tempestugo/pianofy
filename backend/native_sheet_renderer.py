@@ -225,16 +225,16 @@ def render_ethereal_score_video(
     gy = np.linspace(0, 2.25, gh, dtype=np.float32)
     grid_X, grid_Y = np.meshgrid(gx, gy)
 
-    # 7. Generate Pre-rendered Bloom Glow Sprite
-    glow_r = int(38 * (zoom / 1.38))
+    # 7. Generate Pre-rendered Pure White Luminous Flash Sprite
+    glow_r = int(18 * (zoom / 1.38))
     glow_sprite = np.zeros((glow_r * 2, glow_r * 2, 3), dtype=np.float32)
     for dy in range(-glow_r, glow_r):
         for dx in range(-glow_r, glow_r):
             dist = np.sqrt(dx*dx + dy*dy)
             if dist < glow_r:
                 decay = (1.0 - (dist / glow_r)) ** 2.2
-                # Golden amber/ruby glow aura
-                glow_sprite[dy + glow_r, dx + glow_r] = [45.0 * decay, 140.0 * decay, 255.0 * decay]
+                # Pure white luminous flash (soft, non-blinding intensity)
+                glow_sprite[dy + glow_r, dx + glow_r] = [175.0 * decay, 175.0 * decay, 175.0 * decay]
 
     # 8. 2D Elliptical Spotlight Mask & Vignette
     screen_target_x = width * 0.38
@@ -317,6 +317,11 @@ def render_ethereal_score_video(
             n for n in active_sys["notes"]
             if n["on_ms"] <= current_time_ms <= n["off_ms"]
         ]
+        # Notes played so far on active system (to keep softly illuminated)
+        illuminated_notes = [
+            n for n in active_sys["notes"]
+            if n["on_ms"] <= current_time_ms
+        ]
 
         # Calculate playhead_x for active system
         if active_notes:
@@ -370,12 +375,12 @@ def render_ethereal_score_video(
                 cam_x += (target_cam_x - cam_x) * 0.08
             cam_y += (target_cam_y - cam_y) * 0.06
 
-        # Camera shake driven by tension
+        # Camera shake driven by tension (subtle, dampened micro-tremor)
         shake_x, shake_y = 0.0, 0.0
-        if cur_tension > 0.22:
-            shake_mag = (cur_tension ** 1.8) * 8.0
-            shake_x = np.sin(frame_idx * 1.7) * shake_mag + np.cos(frame_idx * 3.1) * (shake_mag * 0.4)
-            shake_y = np.cos(frame_idx * 2.1) * shake_mag + np.sin(frame_idx * 4.3) * (shake_mag * 0.3)
+        if cur_tension > 0.35:
+            shake_mag = (cur_tension ** 2.2) * 2.8
+            shake_x = np.sin(frame_idx * 1.6) * shake_mag + np.cos(frame_idx * 2.8) * (shake_mag * 0.3)
+            shake_y = np.cos(frame_idx * 1.9) * shake_mag + np.sin(frame_idx * 3.7) * (shake_mag * 0.25)
 
         effective_cam_x = cam_x + shake_x
         effective_cam_y = cam_y + shake_y
@@ -433,9 +438,22 @@ def render_ethereal_score_video(
 
         frame = np.clip(s_rgb * s_alpha + bg_frame.astype(np.float32) * (1.0 - s_alpha), 0, 255).astype(np.uint8)
 
-        # Draw glowing bloom aura on active notes (luminosity boosted by agogics)
-        bloom_boost = 1.3 + (cur_tension * 1.7)
-        for n in active_notes:
+        # Draw pure white luminous flash on onset & persistent semi-illumination on played notes
+        for n in illuminated_notes:
+            dt = current_time_ms - n["on_ms"]
+            is_sustaining = (current_time_ms <= n["off_ms"])
+
+            # Subtle initial onset flash (lasts ~110ms, gentle boost)
+            onset_flash = np.exp(-dt / 35.0) if dt < 120.0 else 0.0
+
+            # Persistent gentle illumination on played notes ("meio iluminadas")
+            if is_sustaining:
+                base_glow = 0.28 + (cur_tension * 0.15)
+            else:
+                base_glow = 0.16 + (cur_tension * 0.08)
+
+            bloom_boost = base_glow + onset_flash * 0.45
+
             scr_nx = int((n["x"] - effective_cam_x) * zoom + screen_target_x)
             scr_ny = int((n["y"] - effective_cam_y) * zoom + screen_target_y)
 
@@ -459,10 +477,12 @@ def render_ethereal_score_video(
             sub_frame = frame[y1:y2, x1:x2].astype(np.float32)
             frame[y1:y2, x1:x2] = np.clip(sub_frame + glow_crop * bloom_boost, 0, 255).astype(np.uint8)
 
-            # Hot-white glowing core on notehead
+            # Crisp white core on notehead
             if 0 <= scr_nx < width and 0 <= scr_ny < height:
-                core_r = int(5 + cur_tension * 3)
-                cv2.circle(frame, (scr_nx, scr_ny), core_r, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+                if onset_flash > 0.05:
+                    cv2.circle(frame, (scr_nx, scr_ny), 3, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+                elif is_sustaining:
+                    cv2.circle(frame, (scr_nx, scr_ny), 2, (245, 245, 250), -1, lineType=cv2.LINE_AA)
 
         pipe.stdin.write(frame.tobytes())
 
