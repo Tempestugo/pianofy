@@ -15,14 +15,14 @@ def render_ethereal_score_video(
     fps: int = 60,
     width: int = 1920,
     height: int = 1080,
-    zoom: float = 1.38,
+    zoom: float = 1.85,
     progress_callback = None
 ) -> dict:
     """
     Renders an ethereal, cinematic 2D sheet music video directly using:
     - Verovio (C++ engraving for classical notation typography)
     - resvg-py (ultra-fast Rust SVG rasterizer)
-    - OpenCV (camera tracking, progressive note reveal, additive bloom shaders, and particles)
+    - OpenCV (agogic tension curves, red cloud nebula, camera tracking, progressive note reveal, and additive bloom)
     - FFmpeg (high-performance deterministic rawvideo pipe with synchronized audio)
     """
     if not os.path.exists(musicxml_path):
@@ -54,10 +54,12 @@ def render_ethereal_score_video(
     total_frames = max(60, int(fps * total_duration_sec))
 
     note_intervals = {}
+    all_onsets = []
     for entry in timemap:
         t = entry.get("tstamp", 0)
         if "on" in entry:
             for nid in entry["on"]:
+                all_onsets.append(t)
                 if nid not in note_intervals:
                     note_intervals[nid] = [t, t + 450] # default 450ms sustain
         if "off" in entry:
@@ -65,8 +67,30 @@ def render_ethereal_score_video(
                 if nid in note_intervals:
                     note_intervals[nid][1] = t
 
-    # 3. Typography and Two-Layer Styles
-    # Full score style (notes, text, clefs, dynamics with luminous palette)
+    all_onsets.sort()
+
+    # 3. Calculate Adaptive Musical Agogics & Tension Curve
+    densities = np.zeros(total_frames, dtype=np.float32)
+    for f in range(total_frames):
+        t_ms = (f / float(fps)) * 1000.0
+        # Onset density in a 400ms window centered on current time
+        densities[f] = sum(1 for o in all_onsets if abs(o - t_ms) <= 400)
+
+    # Adaptive dynamic range normalization using 10th and 90th percentiles
+    p10 = float(np.percentile(densities, 10))
+    p90 = float(np.percentile(densities, 90))
+    span = max(1.0, p90 - p10)
+
+    # Power curve so calm passages stay deep/dark, and high density flares into tension
+    norm_density = np.clip((densities - p10) / span, 0.0, 1.0) ** 1.6
+
+    # Smooth with a temporal Gaussian-like kernel (approx 0.5s)
+    k_size = int(fps * 0.5) | 1
+    kernel = np.ones(k_size, dtype=np.float32) / k_size
+    tension_curve = np.convolve(norm_density, kernel, mode="same")
+    tension_curve = np.clip(tension_curve, 0.0, 1.0)
+
+    # 4. Typography and Two-Layer Styles
     style_full = """
     <style>
       path, polygon, rect { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
@@ -80,7 +104,6 @@ def render_ethereal_score_video(
     </style>
     """
 
-    # Base staves style (hiding notes, chords, stems, beams, accidentals for progressive reveal)
     style_staves = """
     <style>
       path, polygon, rect { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
@@ -94,11 +117,10 @@ def render_ethereal_score_video(
     </style>
     """
 
-    # 4. Rasterize each page in dual layers and extract systems
+    # 5. Rasterize each page in dual layers and extract systems
     pages_data = []
     for p_num in range(1, total_pages + 1):
         raw_svg = tk.renderToSVG(p_num)
-        # Sanitize SMuFL missing notehead glyph in tempo text
         raw_svg = raw_svg.replace("\ueca5", chr(0x2669))
 
         svg_full = raw_svg.replace("</svg>", f"{style_full}</svg>")
@@ -197,36 +219,35 @@ def render_ethereal_score_video(
             pages_data[i+1]["start_ms"] - 400.0 if i < len(pages_data) - 1 else total_duration_sec * 1000.0
         )
 
-    # 5. Generate Pre-rendered Bloom Glow Sprite
-    glow_r = int(36 * zoom)
+    # 6. Precompute Noise Mesh for Red Clouds
+    gw, gh = 160, 90
+    gx = np.linspace(0, 4.0, gw, dtype=np.float32)
+    gy = np.linspace(0, 2.25, gh, dtype=np.float32)
+    grid_X, grid_Y = np.meshgrid(gx, gy)
+
+    # 7. Generate Pre-rendered Bloom Glow Sprite
+    glow_r = int(38 * (zoom / 1.38))
     glow_sprite = np.zeros((glow_r * 2, glow_r * 2, 3), dtype=np.float32)
     for dy in range(-glow_r, glow_r):
         for dx in range(-glow_r, glow_r):
             dist = np.sqrt(dx*dx + dy*dy)
             if dist < glow_r:
                 decay = (1.0 - (dist / glow_r)) ** 2.2
-                # Golden amber glow aura: B=65, G=185, R=255
-                glow_sprite[dy + glow_r, dx + glow_r] = [65.0 * decay, 185.0 * decay, 255.0 * decay]
+                # Golden amber/ruby glow aura
+                glow_sprite[dy + glow_r, dx + glow_r] = [45.0 * decay, 140.0 * decay, 255.0 * decay]
 
-    # 6. Base Ethereal Twilight Background (Deep indigo to purple wine gradient)
-    base_bg = np.zeros((height, width, 3), dtype=np.uint8)
-    for r in range(height):
-        t = r / float(height)
-        b_val = int(24 + t * 26)
-        g_val = int(8 + t * 14)
-        r_val = int(12 + t * 46)
-        base_bg[r, :] = (b_val, g_val, r_val)
+    # 8. 2D Elliptical Spotlight Mask & Vignette
+    screen_target_x = width * 0.38
+    screen_target_y = height * 0.50
+    y_coords, x_coords = np.mgrid[0:height, 0:width].astype(np.float32)
+    dx = (x_coords - screen_target_x) / (width * 0.48)
+    dy = (y_coords - screen_target_y) / (height * 0.52)
+    dist_sq = dx * dx + dy * dy
+    spotlight_raw = np.clip(1.0 - (dist_sq ** 1.15), 0.0, 1.0)
+    spotlight_score = np.clip(spotlight_raw * 1.55, 0.0, 1.0)[:, :, np.newaxis]
+    bg_vignette = np.clip(1.0 - (dist_sq ** 1.1) * 1.15, 0.0, 1.0)
 
-    # 7. Ethereal Particle System (Magical floating stardust)
-    np.random.seed(42)
-    num_particles = 90
-    particles_x = np.random.uniform(0, width, num_particles)
-    particles_y = np.random.uniform(0, height, num_particles)
-    particles_speed = np.random.uniform(0.3, 1.1, num_particles)
-    particles_size = np.random.randint(1, 3, num_particles)
-    particles_phase = np.random.uniform(0, 2 * np.pi, num_particles)
-
-    # 8. Setup FFmpeg Process
+    # 9. Setup FFmpeg Process
     os.makedirs(os.path.dirname(os.path.abspath(output_video_path)), exist_ok=True)
     temp_raw_video = output_video_path + ".temp_raw.mp4"
 
@@ -251,16 +272,16 @@ def render_ethereal_score_video(
     last_report_time = 0.0
 
     # Camera tracking state
-    screen_target_x = width * 0.38
-    screen_target_y = height * 0.50
     cam_x = 0.0
     cam_y = 0.0
     cam_inited = False
     current_page_idx = -1
 
-    # 9. Frame Rendering Loop
+    # 10. Frame Rendering Loop
     for frame_idx in range(total_frames):
         current_time_ms = (frame_idx / float(fps)) * 1000.0
+        time_sec = frame_idx / float(fps)
+        cur_tension = float(tension_curve[frame_idx])
 
         # Determine current active page
         current_page = pages_data[0]
@@ -312,9 +333,9 @@ def render_ethereal_score_video(
             else:
                 playhead_x = float(active_sys["min_x"])
 
-        # Progressive note reveal compositing
+        # Progressive note reveal (invisible line, notes appear at playhead)
         page_comp = current_page["img_staves"].copy()
-        feather = 14
+        feather = 16
         for s in current_page["systems"]:
             top = s["top_y"]
             bot = s["bottom_y"]
@@ -322,8 +343,8 @@ def render_ethereal_score_video(
                 # System completely finished: full reveal
                 page_comp[top:bot, :] = current_page["img_full"][top:bot, :]
             elif current_time_ms >= s["start_ms"]:
-                # Active system: reveal up to playhead_x with soft edge
-                px = int(playhead_x + 8)
+                # Active system: reveal up to playhead_x with soft organic edge
+                px = int(playhead_x + 6)
                 page_comp[top:bot, :max(0, px - feather)] = current_page["img_full"][top:bot, :max(0, px - feather)]
                 for f_i in range(feather):
                     col = px - feather + f_i
@@ -343,16 +364,26 @@ def render_ethereal_score_video(
             cam_y = target_cam_y
             cam_inited = True
         else:
-            if abs(target_cam_x - cam_x) > 600:
+            if abs(target_cam_x - cam_x) > 700:
                 cam_x = target_cam_x - 100.0
             else:
                 cam_x += (target_cam_x - cam_x) * 0.08
             cam_y += (target_cam_y - cam_y) * 0.06
 
+        # Camera shake driven by tension
+        shake_x, shake_y = 0.0, 0.0
+        if cur_tension > 0.22:
+            shake_mag = (cur_tension ** 1.8) * 8.0
+            shake_x = np.sin(frame_idx * 1.7) * shake_mag + np.cos(frame_idx * 3.1) * (shake_mag * 0.4)
+            shake_y = np.cos(frame_idx * 2.1) * shake_mag + np.sin(frame_idx * 4.3) * (shake_mag * 0.3)
+
+        effective_cam_x = cam_x + shake_x
+        effective_cam_y = cam_y + shake_y
+
         # Affine transform for camera viewport onto 1080p
         M = np.array([
-            [zoom, 0, screen_target_x - cam_x * zoom],
-            [0, zoom, screen_target_y - cam_y * zoom]
+            [zoom, 0, screen_target_x - effective_cam_x * zoom],
+            [0, zoom, screen_target_y - effective_cam_y * zoom]
         ], dtype=np.float32)
 
         warped = cv2.warpAffine(
@@ -362,31 +393,62 @@ def render_ethereal_score_video(
             borderValue=(0, 0, 0, 0)
         )
 
-        # Base frame setup with floating stardust particles
-        frame = base_bg.copy()
-        particles_y -= particles_speed
-        particles_y = np.where(particles_y < 0, height, particles_y)
-        for p_i in range(num_particles):
-            px = int(particles_x[p_i] + np.sin(frame_idx * 0.04 + particles_phase[p_i]) * 8)
-            py = int(particles_y[p_i])
-            if 0 <= px < width and 0 <= py < height:
-                sz = int(particles_size[p_i])
-                cv2.circle(frame, (px, py), sz, (180, 200, 255), -1, lineType=cv2.LINE_AA)
+        # High tension motion blur / optical bloom
+        if cur_tension > 0.60:
+            blur_amount = 1 + int((cur_tension - 0.60) * 8)
+            if blur_amount > 1:
+                blurred_score = cv2.blur(warped, (blur_amount, 1))
+                warped = cv2.addWeighted(warped, 0.65, blurred_score, 0.35, 0)
 
-        # Composite warped score over cosmic background
-        s_rgb = warped[:, :, :3]
+        # Procedural Red Clouds (Crimson Nebula) background driven by agogics
+        # Drifting multi-octave noise
+        n1 = np.sin(grid_X * 1.5 + time_sec * 0.45) * np.cos(grid_Y * 1.8 - time_sec * 0.35)
+        n2 = np.sin(grid_X * 3.2 - time_sec * 0.75 + n1 * 0.8) * np.cos(grid_Y * 3.5 + time_sec * 0.55)
+        n3 = np.sin(grid_X * 6.1 + time_sec * 1.1) * np.cos(grid_Y * 6.2 - time_sec * 0.9)
+        cloud_raw = np.clip((n1 * 0.5 + n2 * 0.35 + n3 * 0.15 + 1.0) * 0.5, 0.0, 1.0)
+        cloud_hd = cv2.resize(cloud_raw.astype(np.float32), (width, height), interpolation=cv2.INTER_CUBIC)
+
+        # Modulate color by tension: pure dark when calm -> deep wine -> radiant crimson when tense
+        cloud_power = float(np.power(cur_tension, 1.45))
+        if cloud_power < 0.02:
+            # Pure dark stage background when calm
+            bg_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        else:
+            # Cinematic wine-crimson nebula clouds (calibrated to reference video)
+            cloud_r = np.clip((cloud_hd * 85.0 + 35.0) * cloud_power, 0, 255)
+            cloud_g = np.clip((cloud_hd * 22.0 + 2.0) * (cloud_power ** 1.2), 0, 255)
+            cloud_b = np.clip((cloud_hd * 36.0 + 4.0) * (cloud_power ** 1.2), 0, 255)
+
+            # Peripheral vignette keeping screen edges deep, cinematic and focused
+            cloud_r = (cloud_r * bg_vignette).astype(np.uint8)
+            cloud_g = (cloud_g * bg_vignette).astype(np.uint8)
+            cloud_b = (cloud_b * bg_vignette).astype(np.uint8)
+            bg_frame = cv2.merge([cloud_b, cloud_g, cloud_r])
+
+        # Composite score with 2D spotlight vignette
+        s_rgb = warped[:, :, :3].astype(np.float32)
         s_alpha = (warped[:, :, 3] / 255.0)[:, :, np.newaxis]
-        frame = (s_rgb * s_alpha + frame * (1.0 - s_alpha)).astype(np.uint8)
+        # Apply 2D elliptical spotlight mask
+        s_alpha = s_alpha * spotlight_score
 
-        # Draw glowing bloom aura for each active note
+        frame = np.clip(s_rgb * s_alpha + bg_frame.astype(np.float32) * (1.0 - s_alpha), 0, 255).astype(np.uint8)
+
+        # Draw glowing bloom aura on active notes (luminosity boosted by agogics)
+        bloom_boost = 1.3 + (cur_tension * 1.7)
         for n in active_notes:
-            scr_nx = int((n["x"] - cam_x) * zoom + screen_target_x)
-            scr_ny = int((n["y"] - cam_y) * zoom + screen_target_y)
+            scr_nx = int((n["x"] - effective_cam_x) * zoom + screen_target_x)
+            scr_ny = int((n["y"] - effective_cam_y) * zoom + screen_target_y)
+
+            if scr_nx < -glow_r or scr_nx > width + glow_r or scr_ny < -glow_r or scr_ny > height + glow_r:
+                continue
 
             x1 = max(0, scr_nx - glow_r)
             x2 = min(width, scr_nx + glow_r)
             y1 = max(0, scr_ny - glow_r)
             y2 = min(height, scr_ny + glow_r)
+
+            if x1 >= x2 or y1 >= y2:
+                continue
 
             sp_x1 = x1 - (scr_nx - glow_r)
             sp_x2 = sp_x1 + (x2 - x1)
@@ -395,33 +457,12 @@ def render_ethereal_score_video(
 
             glow_crop = glow_sprite[sp_y1:sp_y2, sp_x1:sp_x2]
             sub_frame = frame[y1:y2, x1:x2].astype(np.float32)
-            frame[y1:y2, x1:x2] = np.clip(sub_frame + glow_crop * 1.8, 0, 255).astype(np.uint8)
+            frame[y1:y2, x1:x2] = np.clip(sub_frame + glow_crop * bloom_boost, 0, 255).astype(np.uint8)
 
             # Hot-white glowing core on notehead
-            cv2.circle(frame, (scr_nx, scr_ny), 5, (255, 255, 255), -1, lineType=cv2.LINE_AA)
-
-        # Dynamic glowing playhead beam
-        scr_ph_x = int((playhead_x - cam_x) * zoom + screen_target_x)
-        scr_min_y = int((active_sys["min_y"] - 35 - cam_y) * zoom + screen_target_y)
-        scr_max_y = int((active_sys["max_y"] + 35 - cam_y) * zoom + screen_target_y)
-
-        if 0 <= scr_ph_x < width:
-            # Outer subtle glow line
-            cv2.line(
-                frame,
-                (scr_ph_x, max(0, scr_min_y)),
-                (scr_ph_x, min(height, scr_max_y)),
-                (40, 180, 255), 3,
-                lineType=cv2.LINE_AA
-            )
-            # Inner core laser beam
-            cv2.line(
-                frame,
-                (scr_ph_x, max(0, scr_min_y)),
-                (scr_ph_x, min(height, scr_max_y)),
-                (220, 250, 255), 1,
-                lineType=cv2.LINE_AA
-            )
+            if 0 <= scr_nx < width and 0 <= scr_ny < height:
+                core_r = int(5 + cur_tension * 3)
+                cv2.circle(frame, (scr_nx, scr_ny), core_r, (255, 255, 255), -1, lineType=cv2.LINE_AA)
 
         pipe.stdin.write(frame.tobytes())
 
@@ -435,7 +476,7 @@ def render_ethereal_score_video(
     pipe.stdin.close()
     pipe.wait()
 
-    # 10. Mux with Audio if provided
+    # 11. Mux with Audio if provided
     has_audio = audio_path and os.path.exists(audio_path)
     if has_audio:
         ffmpeg_mux_cmd = [
