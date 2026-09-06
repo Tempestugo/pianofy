@@ -283,22 +283,35 @@ def render_ethereal_score_video(
                     start_ms = min(n["on_ms"] for n in sys_notes)
                     end_ms = max(n["off_ms"] for n in sys_notes)
                     # Group notes into discrete sequential events for the entire system (preserves stems across staves)
-                    s_notes = sorted(sys_notes, key=lambda n: (n["on_ms"], n["x"]))
-                    sys_events = []
-                    for n in s_notes:
-                        if not sys_events or abs(n["on_ms"] - sys_events[-1]["on_ms"]) > 15:
-                            sys_events.append({
+                    # Column-aware clustering: if notes share nearly the same X coordinate (|x1 - x2| < 35px)
+                    # and close onset times (|on1 - on2| < 800ms, e.g. rolled arpeggios/chords), they belong to the
+                    # same musical chord column and must reveal together to prevent vertical slicing of noteheads/arpeggios!
+                    col_evs = []
+                    for n in sorted(sys_notes, key=lambda n: (n["on_ms"], n["x"])):
+                        matched = False
+                        for ev in col_evs:
+                            is_time_match = abs(n["on_ms"] - ev["on_ms"]) <= 15
+                            is_col_match = abs(n["x"] - ev["x_center"]) < 35.0 and abs(n["on_ms"] - ev["on_ms"]) < 800.0
+                            if is_time_match or is_col_match:
+                                ev["notes"].append(n)
+                                ev["on_ms"] = min(ev["on_ms"], n["on_ms"])
+                                ev["is_onset"] = ev["is_onset"] or n.get("is_onset", True)
+                                ev["min_left"] = min(ev["min_left"], n["left_x"])
+                                ev["max_right"] = max(ev["max_right"], n["right_x"])
+                                ev["x_center"] = float(np.mean([note["x"] for note in ev["notes"]]))
+                                matched = True
+                                break
+                        if not matched:
+                            col_evs.append({
                                 "on_ms": n["on_ms"],
                                 "notes": [n],
                                 "is_onset": n.get("is_onset", True),
                                 "min_left": n["left_x"],
-                                "max_right": n["right_x"]
+                                "max_right": n["right_x"],
+                                "x_center": n["x"]
                             })
-                        else:
-                            sys_events[-1]["notes"].append(n)
-                            sys_events[-1]["is_onset"] = sys_events[-1]["is_onset"] or n.get("is_onset", True)
-                            sys_events[-1]["min_left"] = min(sys_events[-1]["min_left"], n["left_x"])
-                            sys_events[-1]["max_right"] = max(sys_events[-1]["max_right"], n["right_x"])
+                    col_evs.sort(key=lambda e: (e["on_ms"], e["x_center"]))
+                    sys_events = col_evs
 
                     page_systems.append({
                         "id": sys_id,

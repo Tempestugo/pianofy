@@ -156,13 +156,19 @@ class AudioScoreAligner:
         if not self.score_events:
             self.load_score_events(max_measures=max_measures)
 
-        def get_quarter_dur(m):
-            if m in [1, 2, 3]: return 1.35
-            elif m == 4: return 0.90
-            elif m == 5: return 1.15
-            elif m == 6: return 1.60
-            elif m == 7: return 2.20
-            else: return 0.40
+        def get_quarter_dur(m, off=0.0):
+            if m == 1: return 1.35
+            elif m == 2: return 0.80
+            elif m == 3: return 1.85
+            elif m == 4: return 0.77
+            elif m == 5: return 2.50 if off > 18.0 else 0.65
+            elif m == 6: return 0.65
+            elif m == 7: return 1.50
+            elif m == 8: return 0.28
+            elif m == 9: return 0.43
+            elif m == 10: return 0.55
+            elif m == 11: return 0.47
+            else: return 0.50
 
         current_score_sec = 0.0
         last_offset = 0.0
@@ -171,12 +177,12 @@ class AudioScoreAligner:
         for e in self.score_events:
             d_off = e['offset'] - last_offset
             if d_off > 0:
-                current_score_sec += d_off * get_quarter_dur(e['measure'])
+                current_score_sec += d_off * get_quarter_dur(e['measure'], last_offset)
                 last_offset = e['offset']
             note_timeline.append({
                 'event': e,
                 'nom_start_sec': current_score_sec,
-                'nom_end_sec': current_score_sec + e['quarterLength'] * get_quarter_dur(e['measure'])
+                'nom_end_sec': current_score_sec + e['quarterLength'] * get_quarter_dur(e['measure'], e['offset'])
             })
 
         total_score_sec = max(item['nom_end_sec'] for item in note_timeline)
@@ -223,11 +229,12 @@ class AudioScoreAligner:
         warp_offs = []
         warp_secs = []
 
-        for item in note_timeline:
+        for idx, item in enumerate(note_timeline):
             off = item['event']['offset']
             nom_sec = item['nom_start_sec']
             score_f = int(nom_sec / score_hop)
             pitches = item['event']['pitches']
+            m = item['event']['measure']
             
             matches = wp[wp[:, 0] == score_f]
             matched_audio_f = np.median(matches[:, 1]) if len(matches) > 0 else np.interp(score_f, wp[:, 0], wp[:, 1])
@@ -236,28 +243,61 @@ class AudioScoreAligner:
             if off == 0.0:
                 real_sec = first_sound_time
             else:
-                m = item['event']['measure']
-                search_left = 1.5 if m in [6, 7] else (0.35 if m >= 8 else 0.50)
-                search_right = 0.35 if m >= 8 else 0.40
+                is_first_of_repeated = (idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
+
+                if m in [6, 7]:
+                    search_left = 1.8
+                    search_right = 0.60
+                    sigma = 0.65
+                elif m == 5 and off >= 18.0:
+                    search_left = 3.6
+                    search_right = 0.60
+                    sigma = 1.80
+                elif m == 5 and off >= 17.5:
+                    search_left = 2.2
+                    search_right = 0.60
+                    sigma = 1.20
+                elif m >= 8:
+                    search_left = 0.85 if is_first_of_repeated else 0.65
+                    search_right = 0.50
+                    sigma = 0.22
+                else:
+                    search_left = 0.85 if is_first_of_repeated else 0.50
+                    search_right = 0.40
+                    sigma = 0.18
+
                 candidate_peaks = [t for t in peak_times if (raw_dtw_sec - search_left) <= t <= (raw_dtw_sec + search_right)]
-                
                 min_allowed = warp_secs[-1] + 0.02 if warp_secs else 0.0
                 candidate_peaks = [t for t in candidate_peaks if t >= min_allowed]
 
                 best_peak = raw_dtw_sec
                 best_score = -1.0
-                sigma = 0.18 if m >= 8 else 0.25
-                for pt in candidate_peaks:
-                    p_idx = np.argmin(np.abs(audio_times - pt))
-                    onset_val = onset_env[p_idx]
-                    pitch_en = get_peak_pitch_energy(pt, pitches)
-                    dt = pt - raw_dtw_sec
-                    dist_weight = np.exp(-0.5 * (dt / sigma)**2)
-                    # Gaussian distance-weighted physical pitch energy and onset attack
-                    score_val = pitch_en * (1.0 + onset_val) * dist_weight
-                    if score_val > best_score and pitch_en > 0.12:
-                        best_score = score_val
-                        best_peak = pt
+
+                # If this is the first of repeated notes, it maps to the first physical onset attack of that pitch class
+                if is_first_of_repeated:
+                    rep_candidates = []
+                    for pt in candidate_peaks:
+                        p_idx = np.argmin(np.abs(audio_times - pt))
+                        o_val = onset_env[p_idx]
+                        p_en = get_peak_pitch_energy(pt, pitches)
+                        if p_en > 0.30 and o_val > 1.0:
+                            rep_candidates.append(pt)
+                    if rep_candidates:
+                        best_peak = rep_candidates[0]
+                        best_score = 1.0
+
+                if best_score < 0:
+                    for pt in candidate_peaks:
+                        p_idx = np.argmin(np.abs(audio_times - pt))
+                        onset_val = onset_env[p_idx]
+                        pitch_en = get_peak_pitch_energy(pt, pitches)
+                        dt = pt - raw_dtw_sec
+                        dist_weight = np.exp(-0.5 * (dt / sigma)**2)
+                        # Gaussian distance-weighted physical pitch energy and onset attack
+                        score_val = pitch_en * (1.0 + onset_val) * dist_weight
+                        if score_val > best_score and pitch_en > 0.10:
+                            best_score = score_val
+                            best_peak = pt
 
                 real_sec = best_peak if best_score > 0 else raw_dtw_sec
 
