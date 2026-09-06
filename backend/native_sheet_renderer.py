@@ -670,8 +670,8 @@ def render_ethereal_score_video(
                 evs = s.get("events", [])
                 if not evs:
                     continue
-                # Reveal synchronized with acoustic hammer strike (tight 30ms anticipation)
-                reveal_t = current_time_ms + 30.0
+                # Reveal synchronized with acoustic hammer strike (optimal 60ms perceptual anticipation)
+                reveal_t = current_time_ms + 60.0
                 if reveal_t < evs[0]["on_ms"]:
                     px = max(0, int(evs[0]["min_left"] - 4))
                 elif reveal_t >= evs[-1]["on_ms"]:

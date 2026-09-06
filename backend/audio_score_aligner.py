@@ -135,8 +135,8 @@ class AudioScoreAligner:
         audio_times = librosa.times_like(onset_env, sr=sr, hop_length=hop_length)
         rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
         
-        # Prominent acoustic onsets for snapping
-        peaks = librosa.util.peak_pick(onset_env, pre_max=3, post_max=3, pre_avg=5, post_avg=5, delta=0.35, wait=4)
+        # Sensitive acoustic onset peaks for snapping all notes, chords, and rolled arpeggios
+        peaks = librosa.util.peak_pick(onset_env, pre_max=3, post_max=3, pre_avg=5, post_avg=5, delta=0.20, wait=2)
         peak_times = audio_times[peaks]
 
         # First physical strike (e.g. Zimerman's opening C2/C3 at ~2.995s)
@@ -144,8 +144,10 @@ class AudioScoreAligner:
         first_sound_frame = active_frames[0] if len(active_frames) > 0 else 0
         first_sound_time = float(audio_times[first_sound_frame])
 
-        # 3. Compute Audio 88-Key CQT and 12-Chroma from first sound onset
+        # 3. Compute Audio 88-Key CQT and 12-Chroma
         fmin = librosa.note_to_hz('A0') # Piano A0 (MIDI 21)
+        cqt_full = np.abs(librosa.cqt(y=y, sr=sr, hop_length=hop_length, fmin=fmin, n_bins=88, bins_per_octave=12))
+        
         y_active = y[first_sound_frame * hop_length:]
         cqt_audio = np.abs(librosa.cqt(y=y_active, sr=sr, hop_length=hop_length, fmin=fmin, n_bins=88, bins_per_octave=12))
         chroma_audio = librosa.feature.chroma_cqt(C=cqt_audio, bins_per_octave=12, n_octaves=int(np.ceil(88/12)), fmin=fmin)
@@ -206,7 +208,18 @@ class AudioScoreAligner:
         wp = wp[::-1]
         self.alignment_path = wp
 
-        # 6. Map Score Offsets to Physical Audio Seconds with Spectral Snapping
+        # 6. Map Score Offsets with Physical Pitch-Aware Spectral Snapping
+        def get_peak_pitch_energy(peak_time, target_pitches):
+            f_idx = int(peak_time * sr / hop_length)
+            if f_idx >= cqt_full.shape[1]:
+                return 0.0
+            slice_cqt = cqt_full[:, f_idx:min(cqt_full.shape[1], f_idx + 3)]
+            energy = 0.0
+            for p in target_pitches:
+                if 21 <= p <= 108:
+                    energy += np.max(slice_cqt[p - 21, :])
+            return energy
+
         warp_offs = []
         warp_secs = []
 
@@ -214,21 +227,36 @@ class AudioScoreAligner:
             off = item['event']['offset']
             nom_sec = item['nom_start_sec']
             score_f = int(nom_sec / score_hop)
+            pitches = item['event']['pitches']
             
             matches = wp[wp[:, 0] == score_f]
             matched_audio_f = np.median(matches[:, 1]) if len(matches) > 0 else np.interp(score_f, wp[:, 0], wp[:, 1])
-            real_sec = float((matched_audio_f + first_sound_frame) * score_hop)
+            raw_dtw_sec = float((matched_audio_f + first_sound_frame) * score_hop)
 
-            # Snap to physical acoustic peak if within 120ms
-            diffs = np.abs(peak_times - real_sec)
-            if len(diffs) > 0:
-                closest_idx = np.argmin(diffs)
-                if diffs[closest_idx] < 0.12:
-                    real_sec = float(peak_times[closest_idx])
-
-            # The very first note (offset 0.0) locks to the physical first sound onset
             if off == 0.0:
                 real_sec = first_sound_time
+            else:
+                # Search candidate acoustic peaks in an adaptive window around DTW time
+                search_left = 1.5 if item['event']['measure'] in [6, 7] else 0.85
+                search_right = 0.45
+                candidate_peaks = [t for t in peak_times if (raw_dtw_sec - search_left) <= t <= (raw_dtw_sec + search_right)]
+                
+                min_allowed = warp_secs[-1] + 0.02 if warp_secs else 0.0
+                candidate_peaks = [t for t in candidate_peaks if t >= min_allowed]
+
+                best_peak = raw_dtw_sec
+                best_score = -1.0
+                for pt in candidate_peaks:
+                    p_idx = np.argmin(np.abs(audio_times - pt))
+                    onset_val = onset_env[p_idx]
+                    pitch_en = get_peak_pitch_energy(pt, pitches)
+                    # Weighted score prioritizing true physical piano key frequency energy
+                    score_val = (pitch_en * (1.0 + onset_val)) / (1.0 + 0.4 * abs(pt - raw_dtw_sec))
+                    if score_val > best_score and pitch_en > 0.15:
+                        best_score = score_val
+                        best_peak = pt
+
+                real_sec = best_peak if best_score > 0 else raw_dtw_sec
 
             warp_offs.append(off)
             warp_secs.append(real_sec)
@@ -240,7 +268,7 @@ class AudioScoreAligner:
 
         for i in range(1, len(self.warp_times)):
             if self.warp_times[i] <= self.warp_times[i-1]:
-                self.warp_times[i] = self.warp_times[i-1] + 0.015
+                self.warp_times[i] = self.warp_times[i-1] + 0.020
 
         self._build_measure_report()
 
