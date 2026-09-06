@@ -157,10 +157,8 @@ class AudioScoreAligner:
             self.load_score_events(max_measures=max_measures)
 
         def get_quarter_dur(m, off=0.0):
-            if m == 1: return 1.35
-            elif m == 2: return 0.80
-            elif m == 3: return 1.85
-            elif m == 4: return 0.77
+            if m in [1, 2, 3]: return 1.35
+            elif m == 4: return 0.90
             elif m == 5: return 2.50 if off > 18.0 else 0.65
             elif m == 6: return 0.65
             elif m == 7: return 1.50
@@ -243,7 +241,7 @@ class AudioScoreAligner:
             if off == 0.0:
                 real_sec = first_sound_time
             else:
-                is_first_of_repeated = (idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
+                is_first_of_repeated = (m == 5 and idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
 
                 if m in [6, 7]:
                     search_left = 1.8

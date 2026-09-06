@@ -254,9 +254,34 @@ def render_ethereal_score_video(
                                         if sm:
                                             stem_x = (margin_x + float(sm.group(1))) * scale_x
 
-                                nh_width = 10.0
+                                dot_list = [d for d in n.iter("{http://www.w3.org/2000/svg}g") if "dot" in (d.get("class") or "")]
+                                dot_max_x = None
+                                for d in dot_list:
+                                    for el in d.iter():
+                                        if "cx" in el.attrib:
+                                            dx_val = (margin_x + float(el.attrib["cx"])) * scale_x
+                                            rx_val = float(el.attrib.get("rx", 36)) * scale_x
+                                            dot_max_x = max(dot_max_x or 0.0, dx_val + rx_val)
+
+                                flag_list = [fl for fl in n.iter("{http://www.w3.org/2000/svg}g") if "flag" in (fl.get("class") or "")]
+                                flag_max_x = None
+                                if flag_list:
+                                    flag_u = list(flag_list[0].iter("{http://www.w3.org/2000/svg}use"))
+                                    if flag_u:
+                                        tr_f = re.search(r"translate\((\d+)", flag_u[0].get("transform", ""))
+                                        if tr_f:
+                                            flag_max_x = (margin_x + float(tr_f.group(1))) * scale_x + 12.0
+
+                                nh_width = 24.0
                                 left_bound = (acc_x - 3.0) if acc_x is not None else (nx - 2.0)
-                                right_bound = max(nx + nh_width, stem_x + 2.0 if stem_x is not None else nx + nh_width)
+                                bounds_candidates = [nx + nh_width]
+                                if stem_x is not None:
+                                    bounds_candidates.append(stem_x + 2.0)
+                                if dot_max_x is not None:
+                                    bounds_candidates.append(dot_max_x + 3.0)
+                                if flag_max_x is not None:
+                                    bounds_candidates.append(flag_max_x)
+                                right_bound = max(bounds_candidates)
 
                                 note_obj = {
                                     "id": nid,
@@ -283,15 +308,15 @@ def render_ethereal_score_video(
                     start_ms = min(n["on_ms"] for n in sys_notes)
                     end_ms = max(n["off_ms"] for n in sys_notes)
                     # Group notes into discrete sequential events for the entire system (preserves stems across staves)
-                    # Column-aware clustering: if notes share nearly the same X coordinate (|x1 - x2| < 35px)
-                    # and close onset times (|on1 - on2| < 800ms, e.g. rolled arpeggios/chords), they belong to the
-                    # same musical chord column and must reveal together to prevent vertical slicing of noteheads/arpeggios!
+                    # Strict vertical column clustering: notes must share the exact same vertical X alignment (|dx| <= 3.0 px)
+                    # (such as rolled chords/arpeggios like Measure 7 or chords spanning staves)
+                    # Sequential melodic notes (dx >= 15px) are strictly kept separate to prevent false pairing!
                     col_evs = []
                     for n in sorted(sys_notes, key=lambda n: (n["on_ms"], n["x"])):
                         matched = False
                         for ev in col_evs:
                             is_time_match = abs(n["on_ms"] - ev["on_ms"]) <= 15
-                            is_col_match = abs(n["x"] - ev["x_center"]) < 35.0 and abs(n["on_ms"] - ev["on_ms"]) < 800.0
+                            is_col_match = abs(n["x"] - ev["x_center"]) <= 3.0 and abs(n["on_ms"] - ev["on_ms"]) < 1200.0
                             if is_time_match or is_col_match:
                                 ev["notes"].append(n)
                                 ev["on_ms"] = min(ev["on_ms"], n["on_ms"])
@@ -717,11 +742,10 @@ def render_ethereal_score_video(
                             last_k = k
                             break
                     curr_right = evs[last_k]["max_right"]
-                    next_left = evs[last_k+1]["min_left"]
-                    if curr_right + 2 < next_left - 1:
-                        px = int((curr_right + next_left) / 2.0)
-                    else:
-                        px = int(curr_right + 1)
+                    # Stop strictly at the right boundary of the current event!
+                    # This prevents the connecting beam ("haste de conexão") from prematurely extending into empty space.
+                    # When the next note is struck, px advances, revealing both the next note and the connecting beam!
+                    px = int(curr_right + 1.5)
                 page_comp[top:bot, :px] = current_page["img_full"][top:bot, :px]
 
         # 3. Musical Camera Kinematics: 100% Fluid Continuous Traveling (Never Freezes, Never Stumbles)
