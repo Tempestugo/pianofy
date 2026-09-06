@@ -136,7 +136,7 @@ class AudioScoreAligner:
         rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
         
         # Sensitive acoustic onset peaks for snapping all notes, chords, and rolled arpeggios
-        peaks = librosa.util.peak_pick(onset_env, pre_max=3, post_max=3, pre_avg=5, post_avg=5, delta=0.20, wait=2)
+        peaks = librosa.util.peak_pick(onset_env, pre_max=2, post_max=2, pre_avg=4, post_avg=4, delta=0.15, wait=2)
         peak_times = audio_times[peaks]
 
         # First physical strike (e.g. Zimerman's opening C2/C3 at ~2.995s)
@@ -236,9 +236,9 @@ class AudioScoreAligner:
             if off == 0.0:
                 real_sec = first_sound_time
             else:
-                # Search candidate acoustic peaks in an adaptive window around DTW time
-                search_left = 1.5 if item['event']['measure'] in [6, 7] else 0.85
-                search_right = 0.45
+                m = item['event']['measure']
+                search_left = 1.5 if m in [6, 7] else (0.35 if m >= 8 else 0.50)
+                search_right = 0.35 if m >= 8 else 0.40
                 candidate_peaks = [t for t in peak_times if (raw_dtw_sec - search_left) <= t <= (raw_dtw_sec + search_right)]
                 
                 min_allowed = warp_secs[-1] + 0.02 if warp_secs else 0.0
@@ -246,13 +246,16 @@ class AudioScoreAligner:
 
                 best_peak = raw_dtw_sec
                 best_score = -1.0
+                sigma = 0.18 if m >= 8 else 0.25
                 for pt in candidate_peaks:
                     p_idx = np.argmin(np.abs(audio_times - pt))
                     onset_val = onset_env[p_idx]
                     pitch_en = get_peak_pitch_energy(pt, pitches)
-                    # Weighted score prioritizing true physical piano key frequency energy
-                    score_val = (pitch_en * (1.0 + onset_val)) / (1.0 + 0.4 * abs(pt - raw_dtw_sec))
-                    if score_val > best_score and pitch_en > 0.15:
+                    dt = pt - raw_dtw_sec
+                    dist_weight = np.exp(-0.5 * (dt / sigma)**2)
+                    # Gaussian distance-weighted physical pitch energy and onset attack
+                    score_val = pitch_en * (1.0 + onset_val) * dist_weight
+                    if score_val > best_score and pitch_en > 0.12:
                         best_score = score_val
                         best_peak = pt
 

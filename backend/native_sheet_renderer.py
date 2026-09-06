@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 import verovio
 import resvg_py
+from scipy.interpolate import PchipInterpolator
 
 def render_ethereal_score_video(
     musicxml_path: str,
@@ -418,6 +419,8 @@ def render_ethereal_score_video(
     cam_y_frames = np.zeros(total_frames, dtype=np.float32)
 
     for p_idx, page in enumerate(pages_data):
+        if page.get("active_start_ms", 0.0) >= total_duration_sec * 1000.0:
+            continue
         systems = page["systems"]
         if not systems:
             continue
@@ -467,53 +470,69 @@ def render_ethereal_score_video(
                 continue
 
             t_axis = np.linspace(s_t_start, s_t_end, seg_len)
-            raw_x = np.zeros(seg_len, dtype=np.float32)
 
-            ev_times = np.array([e["on_ms"] for e in evs], dtype=np.float32)
-            ev_xs = np.array([np.mean([n["x"] for n in e["notes"]]) for e in evs], dtype=np.float32)
+            ev_times = np.array([e["on_ms"] for e in evs], dtype=np.float64)
+            ev_xs = np.array([np.mean([n["x"] for n in e["notes"]]) for e in evs], dtype=np.float64)
 
-            for i_f, tf in enumerate(t_axis):
-                if tf <= ev_times[0]:
-                    raw_x[i_f] = ev_xs[0]
-                elif tf >= ev_times[-1]:
-                    raw_x[i_f] = ev_xs[-1] + min(20.0, (tf - ev_times[-1]) * 0.005)
-                else:
-                    idx = np.searchsorted(ev_times, tf) - 1
-                    t_a, t_b = ev_times[idx], ev_times[idx+1]
-                    x_a, x_b = ev_xs[idx], ev_xs[idx+1]
-                    gap = t_b - t_a
+            # Build strictly monotonic, non-stumbling camera keyframes with guaranteed forward drift
+            adj_times = [ev_times[0]]
+            adj_xs = [ev_xs[0]]
+            min_drift_rate = 0.025  # px/ms = 25 px/sec minimum continuous forward movement
 
-                    if gap <= 1800.0:
-                        alpha = (tf - t_a) / max(1.0, gap)
-                        raw_x[i_f] = x_a + (x_b - x_a) * alpha
-                    else:
-                        linger_dur = min(800.0, gap * 0.25)
-                        approach_dur = 350.0
-                        travel_dur = gap - linger_dur - approach_dur
+            for i_e in range(1, len(ev_times)):
+                t_curr = ev_times[i_e]
+                x_curr = ev_xs[i_e]
+                dt = t_curr - adj_times[-1]
+                if dt < 10.0:
+                    adj_xs[-1] = max(adj_xs[-1], x_curr)
+                    continue
+                min_x = adj_xs[-1] + max(3.0, dt * min_drift_rate)
+                adj_times.append(t_curr)
+                adj_xs.append(max(x_curr, min_x))
 
-                        dt = tf - t_a
-                        if dt <= linger_dur:
-                            raw_x[i_f] = x_a + (dt / linger_dur) * 10.0
-                        elif dt >= (gap - approach_dur):
-                            raw_x[i_f] = x_b
-                        else:
-                            p = (dt - linger_dur) / max(1.0, travel_dur)
-                            ease = 0.5 * (1.0 - np.cos(np.pi * p))
-                            drift_x = x_a + 10.0
-                            raw_x[i_f] = drift_x + (x_b - drift_x) * ease
+            # Build strictly increasing knot sequences for PCHIP
+            knots_t = []
+            knots_x = []
 
-            sigma_f = int(0.12 * fps)
-            k_half = int(sigma_f * 3)
-            kx = np.arange(-k_half, k_half + 1)
-            kernel = np.exp(-0.5 * (kx / sigma_f)**2)
-            kernel /= np.sum(kernel)
-            padded = np.pad(raw_x, k_half, mode="edge")
-            smooth_x = np.convolve(padded, kernel, mode="valid")
+            # Pre-roll knot strictly before adj_times[0]
+            if s_t_start < adj_times[0] - 15.0:
+                pre_x = max(50.0, adj_xs[0] - (adj_times[0] - s_t_start) * min_drift_rate)
+                knots_t.append(s_t_start)
+                knots_x.append(pre_x)
+
+            for t_val, x_val in zip(adj_times, adj_xs):
+                if not knots_t or t_val > knots_t[-1] + 5.0:
+                    knots_t.append(t_val)
+                    knots_x.append(max(x_val, knots_x[-1] + 3.0 if knots_x else x_val))
+
+            # Post-roll knot strictly after knots_t[-1]
+            if s_t_end > knots_t[-1] + 15.0:
+                post_x = knots_x[-1] + (s_t_end - knots_t[-1]) * min_drift_rate
+                knots_t.append(s_t_end)
+                knots_x.append(post_x)
+            elif s_t_end > knots_t[-1]:
+                knots_t[-1] = s_t_end
+
+            if len(knots_t) >= 2:
+                pchip = PchipInterpolator(knots_t, knots_x)
+                smooth_x = pchip(t_axis)
+            else:
+                smooth_x = np.full(seg_len, adj_xs[0], dtype=np.float32)
+
+            # Additional Gaussian smoothing for cinematic organic feel
+            sigma_f = int(0.10 * fps)
+            if sigma_f > 1:
+                k_half = int(sigma_f * 3)
+                kx = np.arange(-k_half, k_half + 1)
+                kernel = np.exp(-0.5 * (kx / sigma_f)**2)
+                kernel /= np.sum(kernel)
+                padded = np.pad(smooth_x, k_half, mode="edge")
+                smooth_x = np.convolve(padded, kernel, mode="valid")
 
             cam_x_frames[f_start:f_end] = smooth_x[:seg_len]
             cam_y_frames[f_start:f_end] = sys_obj["center_y"]
 
-        # Inter-system smooth transitions in S-curve
+        # Inter-system smooth transitions in S-curve (guaranteeing exact positional continuity)
         for tr in sys_transitions:
             f_t_start = max(0, int((tr["t_start"] / 1000.0) * fps))
             f_t_end = min(total_frames, int((tr["t_end"] / 1000.0) * fps))
@@ -521,7 +540,9 @@ def render_ethereal_score_video(
             if tr_len > 0:
                 p = np.linspace(0.0, 1.0, tr_len)
                 ease = 0.5 * (1.0 - np.cos(np.pi * p))
-                cam_x_frames[f_t_start:f_t_end] = tr["x_from"] + (tr["x_to"] - tr["x_from"]) * ease
+                x_from = float(cam_x_frames[max(0, f_t_start - 1)])
+                x_to = float(cam_x_frames[min(total_frames - 1, f_t_end)])
+                cam_x_frames[f_t_start:f_t_end] = x_from + (x_to - x_from) * ease
                 cam_y_frames[f_t_start:f_t_end] = tr["y_from"] + (tr["y_to"] - tr["y_from"]) * ease
 
     # Subtle boundary smoothing across frame boundaries
@@ -642,8 +663,8 @@ def render_ethereal_score_video(
             future_notes = [n for n in active_sys["notes"] if n["on_ms"] > current_time_ms]
             if past_notes and future_notes:
                 p_prev, p_next = past_notes[-1], future_notes[0]
-                interp = (current_time_ms - p_prev["on_ms"]) / max(1.0, (p_next["on_ms"] - p_prev["on_ms"]))
-                playhead_x = float(p_prev["x"] + (p_next["x"] - p_prev["x"]) * np.clip(interp, 0.0, 1.0))
+                interp_factor = (current_time_ms - p_prev["on_ms"]) / max(1.0, (p_next["on_ms"] - p_prev["on_ms"]))
+                playhead_x = float(p_prev["x"] + (p_next["x"] - p_prev["x"]) * np.clip(interp_factor, 0.0, 1.0))
             elif past_notes:
                 playhead_x = float(past_notes[-1]["x"])
             else:
