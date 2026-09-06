@@ -429,14 +429,15 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
 
     # Post-process parts to remove polyphonic overlaps and excessive rests
     def remove_polyphonic_overlaps(part):
-        from music21 import note, chord
+        from music21 import note, chord, duration
+        from fractions import Fraction
         import copy
         
         elements_by_offset = {}
         for el in list(part.recurse()):
             if isinstance(el, (note.Note, chord.Chord)):
-                # ARREDONDAMENTO CRUCIAL: Impede que desvios de ponto flutuante do music21 separem acordes perfeitos e apaguem notas!
-                rounded_offset = round(float(el.offset), 3)
+                # Quantize offset to 12th note fraction (preserves 16ths, 8ths, triplets without irrational float decimals)
+                rounded_offset = Fraction(round(float(el.offset) * 12), 12)
                 elements_by_offset.setdefault(rounded_offset, []).append(el)
                 part.remove(el)
                 
@@ -447,17 +448,17 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
         for idx, offset in enumerate(sorted_offsets):
             group = elements_by_offset[offset]
             pitches = []
-            duration = None
+            dur = None
             
             for el in group:
                 if isinstance(el, note.Note):
                     pitches.append(el.pitch)
-                    if duration is None or el.duration.quarterLength > duration.quarterLength:
-                        duration = el.duration
+                    if dur is None or el.duration.quarterLength > dur.quarterLength:
+                        dur = el.duration
                 elif isinstance(el, chord.Chord):
                     pitches.extend(el.pitches)
-                    if duration is None or el.duration.quarterLength > duration.quarterLength:
-                        duration = el.duration
+                    if dur is None or el.duration.quarterLength > dur.quarterLength:
+                        dur = el.duration
                         
             unique_pitches = list(set(pitches))
             if not unique_pitches:
@@ -468,13 +469,13 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
             else:
                 new_el = chord.Chord(unique_pitches)
                 
-            new_el.duration = copy.deepcopy(duration)
+            new_el.duration = copy.deepcopy(dur)
             
             if idx < len(sorted_offsets) - 1:
                 next_offset = sorted_offsets[idx+1]
                 gap = next_offset - offset
                 if gap > 0 and new_el.quarterLength > gap:
-                    new_el.quarterLength = gap
+                    new_el.duration = duration.Duration(Fraction(round(float(gap) * 12), 12))
                     
             part.insert(offset, new_el)
 

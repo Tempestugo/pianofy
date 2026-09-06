@@ -16,7 +16,11 @@ def render_ethereal_score_video(
     width: int = 1920,
     height: int = 1080,
     zoom: float = 1.85,
-    progress_callback = None
+    progress_callback = None,
+    max_duration_sec: float = None,
+    align_to_audio_midi: str = None,
+    align_to_audio_file: str = None,
+    custom_note_intervals: dict = None
 ) -> dict:
     """
     Renders an ethereal, cinematic 2D sheet music video directly using:
@@ -35,9 +39,9 @@ def render_ethereal_score_video(
         tk.setResourcePath(res_path)
 
     verovio_opts = {
-        "pageWidth": 2200,
-        "pageHeight": 1200,
-        "scale": 55,
+        "pageWidth": 3000,
+        "pageHeight": 1600,
+        "scale": 70,
         "adjustPageHeight": False
     }
     tk.setOptions(verovio_opts)
@@ -48,26 +52,58 @@ def render_ethereal_score_video(
     if not timemap:
         return {"status": "error", "error": "Verovio could not extract timemap from MusicXML"}
 
-    # 2. Extract total audio duration and note intervals
-    max_tstamp_ms = max((entry.get("tstamp", 0) for entry in timemap), default=10000)
-    total_duration_sec = (max_tstamp_ms / 1000.0) + 2.5
-    total_frames = max(60, int(fps * total_duration_sec))
+    # Extract tied note ends from MEI so continuation notes don't produce phantom onsets
+    mei_xml = tk.getMEI()
+    root_mei = ET.fromstring(mei_xml)
+    tied_end_ids = {
+        t.get("endid").lstrip("#")
+        for t in root_mei.iter()
+        if "tie" in t.tag and t.get("endid")
+    }
 
-    note_intervals = {}
-    all_onsets = []
-    for entry in timemap:
-        t = entry.get("tstamp", 0)
-        if "on" in entry:
-            for nid in entry["on"]:
-                all_onsets.append(t)
-                if nid not in note_intervals:
-                    note_intervals[nid] = [t, t + 450] # default 450ms sustain
-        if "off" in entry:
-            for nid in entry["off"]:
-                if nid in note_intervals:
-                    note_intervals[nid][1] = t
+    # 2. Extract total audio duration and note intervals (with optional live performance alignment)
+    align_target = align_to_audio_file or (audio_path if audio_path and os.path.exists(audio_path) else align_to_audio_midi)
+    if custom_note_intervals is not None:
+        note_intervals = custom_note_intervals
+        all_onsets = sorted([v[0] for v in note_intervals.values() if v[2]])
+        max_tstamp_ms = max((v[1] for v in note_intervals.values()), default=10000)
+    elif align_target and os.path.exists(align_target):
+        try:
+            from audio_score_aligner import AudioScoreAligner
+            aligner = AudioScoreAligner(musicxml_path, audio_path=align_target)
+            align_res = aligner.align(max_measures=12, max_duration_sec=float(max_duration_sec) if max_duration_sec else 60.0)
+            print(f"[AudioScoreAligner] Direct alignment success: {align_res}")
+            note_intervals = aligner.generate_verovio_aligned_timemap(tk)
+            all_onsets = sorted([v[0] for v in note_intervals.values() if v[2]])
+            max_tstamp_ms = max((v[1] for v in note_intervals.values()), default=10000)
+        except Exception as e:
+            print(f"[Warning] AudioScoreAligner failed: {e}. Falling back to nominal timemap.")
+            align_target = None
+
+    if custom_note_intervals is None and not (align_target and os.path.exists(align_target)):
+        max_tstamp_ms = max((entry.get("tstamp", 0) for entry in timemap), default=10000)
+        note_intervals = {}
+        all_onsets = []
+        for entry in timemap:
+            t = entry.get("tstamp", 0)
+            if "on" in entry:
+                for nid in entry["on"]:
+                    is_real_onset = (nid not in tied_end_ids)
+                    if is_real_onset:
+                        all_onsets.append(t)
+                    if nid not in note_intervals:
+                        note_intervals[nid] = [t, t + 450, is_real_onset]
+            if "off" in entry:
+                for nid in entry["off"]:
+                    if nid in note_intervals:
+                        note_intervals[nid][1] = max(note_intervals[nid][1], t)
 
     all_onsets.sort()
+
+    total_duration_sec = (max_tstamp_ms / 1000.0) + 2.5
+    if max_duration_sec is not None:
+        total_duration_sec = min(total_duration_sec, float(max_duration_sec))
+    total_frames = max(60, int(fps * total_duration_sec))
 
     # 3. Calculate Adaptive Musical Agogics & Tension Curve
     densities = np.zeros(total_frames, dtype=np.float32)
@@ -84,8 +120,8 @@ def render_ethereal_score_video(
     # Power curve so calm passages stay deep/dark, and high density flares into tension
     norm_density = np.clip((densities - p10) / span, 0.0, 1.0) ** 1.6
 
-    # Smooth with a temporal Gaussian-like kernel (approx 0.5s)
-    k_size = int(fps * 0.5) | 1
+    # Smooth with a temporal Gaussian-like kernel (approx 2.0s) for steady, non-flickering atmosphere
+    k_size = int(fps * 2.0) | 1
     kernel = np.ones(k_size, dtype=np.float32) / k_size
     tension_curve = np.convolve(norm_density, kernel, mode="same")
     tension_curve = np.clip(tension_curve, 0.0, 1.0)
@@ -110,18 +146,27 @@ def render_ethereal_score_video(
       .staff path { stroke: #d0c4b4 !important; }
       .barLine path { stroke: #998a78 !important; }
       text, tspan { fill: #f0eae1 !important; stroke: none !important; }
-      .tempo text, .tempo tspan { fill: #ffd67a !important; font-weight: bold; }
-      .mNum text, .mNum tspan { fill: #b8a898 !important; }
       .pgHead, .pgFoot, .footer { display: none !important; }
-      .note, .chord, .beam, .stem, .accid, .flag, .rest, .ledgerLines { display: none !important; }
+      .note, .chord, .beam, .stem, .accid, .flag, .rest, .ledgerLines, .slur, .tie, .dynam, .dir, .ornam, .trill, .turn, .hairpin, .tempo, .mNum { display: none !important; }
     </style>
     """
 
-    # 5. Rasterize each page in dual layers and extract systems
+    style_markings = """
+    <style>
+      path, polygon, rect, use { fill: #f0eae1 !important; stroke: #f0eae1 !important; }
+      text, tspan { fill: #f0eae1 !important; stroke: none !important; }
+      .tempo text, .tempo tspan { fill: #ffd67a !important; font-weight: bold; }
+      .pgHead, .pgFoot, .footer { display: none !important; }
+      .staff, .barLine, .clef, .keySig, .meterSig, .note, .chord, .beam, .stem, .accid, .flag, .rest, .ledgerLines { display: none !important; }
+    </style>
+    """
+
+    # 5. Rasterize each page in triple layers (staves, full, markings) and extract systems
     pages_data = []
     for p_num in range(1, total_pages + 1):
         raw_svg = tk.renderToSVG(p_num)
         raw_svg = raw_svg.replace("\ueca5", chr(0x2669))
+        raw_svg = raw_svg.replace('visibility="hidden"', 'visibility="visible"')
 
         svg_full = raw_svg.replace("</svg>", f"{style_full}</svg>")
         png_full = resvg_py.svg_to_bytes(svg_full)
@@ -130,6 +175,10 @@ def render_ethereal_score_video(
         svg_staves = raw_svg.replace("</svg>", f"{style_staves}</svg>")
         png_staves = resvg_py.svg_to_bytes(svg_staves)
         img_staves = cv2.imdecode(np.frombuffer(png_staves, np.uint8), cv2.IMREAD_UNCHANGED)
+
+        svg_markings = raw_svg.replace("</svg>", f"{style_markings}</svg>")
+        png_markings = resvg_py.svg_to_bytes(svg_markings)
+        img_markings = cv2.imdecode(np.frombuffer(png_markings, np.uint8), cv2.IMREAD_UNCHANGED)
 
         img_h, img_w, _ = img_full.shape
         vb_m = re.search(r'viewBox="([^"]+)"', raw_svg)
@@ -218,6 +267,7 @@ def render_ethereal_score_video(
                                     "right_x": right_bound,
                                     "on_ms": note_intervals[nid][0],
                                     "off_ms": note_intervals[nid][1],
+                                    "is_onset": note_intervals[nid][2] if len(note_intervals[nid]) > 2 else True,
                                     "staff": staff_key
                                 }
                                 staves_data[staff_key].append(note_obj)
@@ -231,42 +281,23 @@ def render_ethereal_score_video(
                     max_x = max(n["x"] for n in sys_notes)
                     start_ms = min(n["on_ms"] for n in sys_notes)
                     end_ms = max(n["off_ms"] for n in sys_notes)
-                    sys_top = max(0, int(min_y - 45))
-                    sys_bot = min(img_h, int(max_y + 45))
-
-                    # Compute vertical staff strips (Treble / Bass separation)
-                    staff_strips = {}
-                    num_staves = len(staves_data)
-                    if num_staves >= 2 and 0 in staves_data and 1 in staves_data and staves_data[0] and staves_data[1]:
-                        y0 = [n["y"] for n in staves_data[0]]
-                        y1 = [n["y"] for n in staves_data[1]]
-                        if max(y0) < min(y1):
-                            split_y = int((max(all_y0) + min(all_y1)) / 2.0) if 'all_y0' in locals() else int((max(y0) + min(y1)) / 2.0)
+                    # Group notes into discrete sequential events for the entire system (preserves stems across staves)
+                    s_notes = sorted(sys_notes, key=lambda n: (n["on_ms"], n["x"]))
+                    sys_events = []
+                    for n in s_notes:
+                        if not sys_events or abs(n["on_ms"] - sys_events[-1]["on_ms"]) > 15:
+                            sys_events.append({
+                                "on_ms": n["on_ms"],
+                                "notes": [n],
+                                "is_onset": n.get("is_onset", True),
+                                "min_left": n["left_x"],
+                                "max_right": n["right_x"]
+                            })
                         else:
-                            split_y = int((min_y + max_y) / 2.0)
-                        staff_strips[0] = (sys_top, split_y)
-                        staff_strips[1] = (split_y, sys_bot)
-                    else:
-                        staff_strips[0] = (sys_top, sys_bot)
-
-                    # Group notes into discrete onset events per staff
-                    staff_events = {}
-                    for s_k, s_notes_list in staves_data.items():
-                        s_notes = sorted(s_notes_list, key=lambda n: n["on_ms"])
-                        events = []
-                        for n in s_notes:
-                            if not events or abs(n["on_ms"] - events[-1]["on_ms"]) > 15:
-                                events.append({
-                                    "on_ms": n["on_ms"],
-                                    "notes": [n],
-                                    "min_left": n["left_x"],
-                                    "max_right": n["right_x"]
-                                })
-                            else:
-                                events[-1]["notes"].append(n)
-                                events[-1]["min_left"] = min(events[-1]["min_left"], n["left_x"])
-                                events[-1]["max_right"] = max(events[-1]["max_right"], n["right_x"])
-                        staff_events[s_k] = events
+                            sys_events[-1]["notes"].append(n)
+                            sys_events[-1]["is_onset"] = sys_events[-1]["is_onset"] or n.get("is_onset", True)
+                            sys_events[-1]["min_left"] = min(sys_events[-1]["min_left"], n["left_x"])
+                            sys_events[-1]["max_right"] = max(sys_events[-1]["max_right"], n["right_x"])
 
                     page_systems.append({
                         "id": sys_id,
@@ -275,14 +306,85 @@ def render_ethereal_score_video(
                         "max_x": max_x,
                         "min_y": min_y,
                         "max_y": max_y,
-                        "top_y": sys_top,
-                        "bottom_y": sys_bot,
+                        "top_y": 0,
+                        "bottom_y": img_h,
                         "center_y": (min_y + max_y) / 2.0,
                         "start_ms": start_ms,
                         "end_ms": end_ms,
-                        "staff_strips": staff_strips,
-                        "staff_events": staff_events
+                        "events": sys_events
                     })
+
+        # Compute non-clipping system vertical boundaries so slurs, ties, and markings are never cut
+        num_sys = len(page_systems)
+        for i in range(num_sys):
+            top_y = 0 if i == 0 else int((page_systems[i-1]["max_y"] + page_systems[i]["min_y"]) / 2.0)
+            bot_y = img_h if i == num_sys - 1 else int((page_systems[i]["max_y"] + page_systems[i+1]["min_y"]) / 2.0)
+            page_systems[i]["top_y"] = top_y
+            page_systems[i]["bottom_y"] = bot_y
+
+        # Extract markings (slurs, hairpins, dynamics, directions, tempo) with onset times & bounds
+        slur_map = {}
+        for s in root_mei.iter("{http://www.music-encoding.org/ns/mei}slur"):
+            sid = s.get("{http://www.w3.org/XML/1998/namespace}id")
+            startid = s.get("startid", "").lstrip("#")
+            endid = s.get("endid", "").lstrip("#")
+            slur_map[sid] = (startid, endid)
+
+        parents = {}
+        for p in root.iter("{http://www.w3.org/2000/svg}g"):
+            for child in p:
+                parents[child] = p
+
+        page_markings = []
+        for g in root.iter("{http://www.w3.org/2000/svg}g"):
+            cls = (g.get("class") or "").split()
+            if any(k in cls for k in ("slur", "hairpin", "dynam", "dir", "tempo")):
+                gid = g.get("id")
+                start_ms = None
+                if "slur" in cls:
+                    st_id, en_id = slur_map.get(gid, (None, None))
+                    if st_id and st_id in note_intervals:
+                        start_ms = note_intervals[st_id][0]
+                if start_ms is None:
+                    curr = g
+                    while curr is not None:
+                        if "measure" in (curr.get("class") or "").split():
+                            m_notes = [n for n in curr.iter("{http://www.w3.org/2000/svg}g") if "note" in (n.get("class") or "").split()]
+                            n_times = [note_intervals[n.get("id")][0] for n in m_notes if n.get("id") in note_intervals]
+                            if n_times:
+                                start_ms = min(n_times)
+                            break
+                        curr = parents.get(curr)
+
+                if start_ms is None:
+                    start_ms = 0.0
+
+                xs, ys = [], []
+                for elem in g.iter():
+                    tr = elem.get("transform", "")
+                    match = re.search(r"translate\((\d+),\s*(\d+)\)", tr)
+                    if match:
+                        xs.append(float(match.group(1)))
+                        ys.append(float(match.group(2)))
+                    d = elem.get("d", "")
+                    if d:
+                        c = [float(val) for val in re.findall(r"[-+]?\d*\.\d+|\d+", d)]
+                        if c:
+                            xs.extend(c[0::2])
+                            ys.extend(c[1::2])
+
+                if xs and ys:
+                    x1 = int(max(0, (margin_x + min(xs)) * scale_x - 4))
+                    x2 = int(min(img_w, (margin_x + max(xs)) * scale_x + 4))
+                    y1 = int(max(0, (margin_y + min(ys)) * scale_y - 4))
+                    y2 = int(min(img_h, (margin_y + max(ys)) * scale_y + 4))
+                    if x2 > x1 and y2 > y1:
+                        page_markings.append({
+                            "id": gid,
+                            "class": cls,
+                            "start_ms": start_ms,
+                            "x1": x1, "x2": x2, "y1": y1, "y2": y2
+                        })
 
         p_start_ms = min((n["on_ms"] for n in page_notes), default=0.0)
         p_end_ms = max((n["off_ms"] for n in page_notes), default=999999.0)
@@ -291,6 +393,8 @@ def render_ethereal_score_video(
             "page_num": p_num,
             "img_full": img_full,
             "img_staves": img_staves,
+            "img_markings": img_markings,
+            "markings": page_markings,
             "img_w": img_w,
             "img_h": img_h,
             "notes": page_notes,
@@ -299,6 +403,9 @@ def render_ethereal_score_video(
             "end_ms": p_end_ms
         })
 
+        if p_start_ms > (total_duration_sec * 1000.0 + 2000.0):
+            break
+
     # Adjust page transition boundaries
     for i in range(len(pages_data)):
         pages_data[i]["active_start_ms"] = 0.0 if i == 0 else pages_data[i]["start_ms"] - 400.0
@@ -306,7 +413,128 @@ def render_ethereal_score_video(
             pages_data[i+1]["start_ms"] - 400.0 if i < len(pages_data) - 1 else total_duration_sec * 1000.0
         )
 
-    # 6. Precompute Noise Mesh for Red Clouds
+    # 6. Precompute 100% Continuous, Gaussian-Smoothed Musical Camera Trajectory (Never Stumbles, Never Stops)
+    cam_x_frames = np.zeros(total_frames, dtype=np.float32)
+    cam_y_frames = np.zeros(total_frames, dtype=np.float32)
+
+    for p_idx, page in enumerate(pages_data):
+        systems = page["systems"]
+        if not systems:
+            continue
+
+        # Calculate dynamic inter-system transitions within this page
+        sys_transitions = []
+        for s_idx in range(len(systems) - 1):
+            s_curr = systems[s_idx]
+            s_next = systems[s_idx + 1]
+            last_on = s_curr["events"][-1]["on_ms"]
+            next_on = s_next["events"][0]["on_ms"]
+            gap = next_on - last_on
+            mid_ms = (last_on + next_on) / 2.0
+            trans_dur_ms = min(2800.0, max(1400.0, gap * 0.45))
+            t_start = mid_ms - trans_dur_ms / 2.0
+            t_end = mid_ms + trans_dur_ms / 2.0
+            sys_transitions.append({
+                "from_idx": s_idx,
+                "to_idx": s_idx + 1,
+                "t_start": t_start,
+                "t_end": t_end,
+                "x_from": float(np.mean([n["x"] for n in s_curr["events"][-1]["notes"]])),
+                "x_to": float(np.mean([n["x"] for n in s_next["events"][0]["notes"]])),
+                "y_from": float(s_curr["center_y"]),
+                "y_to": float(s_next["center_y"])
+            })
+
+        for s_idx, sys_obj in enumerate(systems):
+            evs = sys_obj["events"]
+            if not evs:
+                continue
+
+            if s_idx == 0:
+                s_t_start = page["active_start_ms"]
+                s_t_end = sys_transitions[0]["t_start"] if sys_transitions else page["active_end_ms"]
+            elif s_idx == len(systems) - 1:
+                s_t_start = sys_transitions[-1]["t_end"]
+                s_t_end = page["active_end_ms"]
+            else:
+                s_t_start = sys_transitions[s_idx-1]["t_end"]
+                s_t_end = sys_transitions[s_idx]["t_start"]
+
+            f_start = max(0, int((s_t_start / 1000.0) * fps))
+            f_end = min(total_frames, int((s_t_end / 1000.0) * fps))
+            seg_len = f_end - f_start
+            if seg_len <= 0:
+                continue
+
+            t_axis = np.linspace(s_t_start, s_t_end, seg_len)
+            raw_x = np.zeros(seg_len, dtype=np.float32)
+
+            ev_times = np.array([e["on_ms"] for e in evs], dtype=np.float32)
+            ev_xs = np.array([np.mean([n["x"] for n in e["notes"]]) for e in evs], dtype=np.float32)
+
+            for i_f, tf in enumerate(t_axis):
+                if tf <= ev_times[0]:
+                    raw_x[i_f] = ev_xs[0]
+                elif tf >= ev_times[-1]:
+                    raw_x[i_f] = ev_xs[-1] + min(20.0, (tf - ev_times[-1]) * 0.005)
+                else:
+                    idx = np.searchsorted(ev_times, tf) - 1
+                    t_a, t_b = ev_times[idx], ev_times[idx+1]
+                    x_a, x_b = ev_xs[idx], ev_xs[idx+1]
+                    gap = t_b - t_a
+
+                    if gap <= 1800.0:
+                        alpha = (tf - t_a) / max(1.0, gap)
+                        raw_x[i_f] = x_a + (x_b - x_a) * alpha
+                    else:
+                        linger_dur = min(800.0, gap * 0.25)
+                        approach_dur = 350.0
+                        travel_dur = gap - linger_dur - approach_dur
+
+                        dt = tf - t_a
+                        if dt <= linger_dur:
+                            raw_x[i_f] = x_a + (dt / linger_dur) * 10.0
+                        elif dt >= (gap - approach_dur):
+                            raw_x[i_f] = x_b
+                        else:
+                            p = (dt - linger_dur) / max(1.0, travel_dur)
+                            ease = 0.5 * (1.0 - np.cos(np.pi * p))
+                            drift_x = x_a + 10.0
+                            raw_x[i_f] = drift_x + (x_b - drift_x) * ease
+
+            sigma_f = int(0.12 * fps)
+            k_half = int(sigma_f * 3)
+            kx = np.arange(-k_half, k_half + 1)
+            kernel = np.exp(-0.5 * (kx / sigma_f)**2)
+            kernel /= np.sum(kernel)
+            padded = np.pad(raw_x, k_half, mode="edge")
+            smooth_x = np.convolve(padded, kernel, mode="valid")
+
+            cam_x_frames[f_start:f_end] = smooth_x[:seg_len]
+            cam_y_frames[f_start:f_end] = sys_obj["center_y"]
+
+        # Inter-system smooth transitions in S-curve
+        for tr in sys_transitions:
+            f_t_start = max(0, int((tr["t_start"] / 1000.0) * fps))
+            f_t_end = min(total_frames, int((tr["t_end"] / 1000.0) * fps))
+            tr_len = f_t_end - f_t_start
+            if tr_len > 0:
+                p = np.linspace(0.0, 1.0, tr_len)
+                ease = 0.5 * (1.0 - np.cos(np.pi * p))
+                cam_x_frames[f_t_start:f_t_end] = tr["x_from"] + (tr["x_to"] - tr["x_from"]) * ease
+                cam_y_frames[f_t_start:f_t_end] = tr["y_from"] + (tr["y_to"] - tr["y_from"]) * ease
+
+    # Subtle boundary smoothing across frame boundaries
+    sigma_global = int(0.08 * fps)
+    if sigma_global > 1:
+        k_h = sigma_global * 2
+        kx = np.arange(-k_h, k_h + 1)
+        kern = np.exp(-0.5 * (kx / sigma_global)**2)
+        kern /= np.sum(kern)
+        cam_x_frames = np.convolve(np.pad(cam_x_frames, k_h, mode="edge"), kern, mode="valid")
+        cam_y_frames = np.convolve(np.pad(cam_y_frames, k_h, mode="edge"), kern, mode="valid")
+
+    # 7. Precompute Noise Mesh for Red Clouds
     gw, gh = 160, 90
     gx = np.linspace(0, 4.0, gw, dtype=np.float32)
     gy = np.linspace(0, 2.25, gh, dtype=np.float32)
@@ -332,6 +560,7 @@ def render_ethereal_score_video(
     dist_sq = dx * dx + dy * dy
     spotlight_raw = np.clip(1.0 - (dist_sq ** 1.15), 0.0, 1.0)
     spotlight_score = np.clip(spotlight_raw * 1.55, 0.0, 1.0)[:, :, np.newaxis]
+    spotlight_u8 = np.clip(spotlight_raw * 1.55 * 255.0, 0.0, 255.0).astype(np.uint8)
     bg_vignette = np.clip(1.0 - (dist_sq ** 1.1) * 1.15, 0.0, 1.0)
 
     # 9. Setup FFmpeg Process
@@ -349,7 +578,7 @@ def render_ethereal_score_video(
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
-        "-crf", "18",
+        "-crf", "16",
         temp_raw_video
     ]
 
@@ -361,8 +590,11 @@ def render_ethereal_score_video(
     # Camera tracking state
     cam_x = 0.0
     cam_y = 0.0
+    cam_vx = 0.0
     cam_inited = False
     current_page_idx = -1
+    last_sys_id = None
+    last_event_idx = -1
 
     # 10. Frame Rendering Loop
     for frame_idx in range(total_frames):
@@ -378,14 +610,6 @@ def render_ethereal_score_video(
                 current_page = p_data
                 p_idx = idx
                 break
-
-        # Handle page transitions for camera
-        if p_idx != current_page_idx:
-            current_page_idx = p_idx
-            if current_page["systems"]:
-                cam_x = current_page["systems"][0]["min_x"] - 50.0
-                cam_y = current_page["systems"][0]["center_y"]
-                cam_inited = True
 
         # Find active system on current page
         active_sys = current_page["systems"][0] if current_page["systems"] else None
@@ -404,9 +628,9 @@ def render_ethereal_score_video(
             n for n in active_sys["notes"]
             if n["on_ms"] <= current_time_ms <= n["off_ms"]
         ]
-        # Notes played so far on active system (to keep softly illuminated)
+        # Notes played so far on current page (to keep softly illuminated within viewport)
         illuminated_notes = [
-            n for n in active_sys["notes"]
+            n for n in current_page["notes"]
             if n["on_ms"] <= current_time_ms
         ]
 
@@ -425,52 +649,51 @@ def render_ethereal_score_video(
             else:
                 playhead_x = float(active_sys["min_x"])
 
-        # Progressive discrete note reveal ("picotada nota por nota")
+        # Progressive discrete note reveal ("picotada nota por nota", full system height preserving all stems)
         page_comp = current_page["img_staves"].copy()
+
+        # 1. Reveal all active markings in full as soon as their start note / measure arrives
+        for m in current_page.get("markings", []):
+            if current_time_ms >= m["start_ms"] - 30.0:
+                x1, x2, y1, y2 = m["x1"], m["x2"], m["y1"], m["y2"]
+                patch = current_page["img_markings"][y1:y2, x1:x2]
+                mask = (patch[:, :, 3] > 0)
+                page_comp[y1:y2, x1:x2][mask] = patch[mask]
+
+        # 2. Progressive discrete note reveal ("picotada nota por nota", full system height preserving all stems)
         for s in current_page["systems"]:
             top = s["top_y"]
             bot = s["bottom_y"]
             if current_time_ms >= s["end_ms"]:
-                # System completely finished: full reveal
                 page_comp[top:bot, :] = current_page["img_full"][top:bot, :]
             elif current_time_ms >= s["start_ms"]:
-                # Active system: reveal staves independently at discrete note events
-                for sk, (y_start, y_end) in s["staff_strips"].items():
-                    evs = s["staff_events"].get(sk, [])
-                    if not evs:
-                        continue
-                    if current_time_ms < evs[0]["on_ms"]:
-                        px = max(0, int(evs[0]["min_left"] - 4))
-                    elif current_time_ms >= evs[-1]["on_ms"]:
-                        px = current_page["img_w"]
+                evs = s.get("events", [])
+                if not evs:
+                    continue
+                # Reveal synchronized with acoustic hammer strike (tight 30ms anticipation)
+                reveal_t = current_time_ms + 30.0
+                if reveal_t < evs[0]["on_ms"]:
+                    px = max(0, int(evs[0]["min_left"] - 4))
+                elif reveal_t >= evs[-1]["on_ms"]:
+                    px = current_page["img_w"]
+                else:
+                    last_k = 0
+                    for k in range(len(evs) - 1):
+                        if evs[k]["on_ms"] <= reveal_t < evs[k+1]["on_ms"]:
+                            last_k = k
+                            break
+                    curr_right = evs[last_k]["max_right"]
+                    next_left = evs[last_k+1]["min_left"]
+                    if curr_right + 2 < next_left - 1:
+                        px = int((curr_right + next_left) / 2.0)
                     else:
-                        last_k = 0
-                        for k in range(len(evs) - 1):
-                            if evs[k]["on_ms"] <= current_time_ms < evs[k+1]["on_ms"]:
-                                last_k = k
-                                break
-                        curr_right = evs[last_k]["max_right"]
-                        next_left = evs[last_k+1]["min_left"]
-                        if curr_right + 2 < next_left - 1:
-                            px = int((curr_right + next_left) / 2.0)
-                        else:
-                            px = int(curr_right + 1)
-                    page_comp[y_start:y_end, :px] = current_page["img_full"][y_start:y_end, :px]
+                        px = int(curr_right + 1)
+                page_comp[top:bot, :px] = current_page["img_full"][top:bot, :px]
 
-        # Smooth camera tracking
-        target_cam_x = playhead_x
-        target_cam_y = active_sys["center_y"]
+        # 3. Musical Camera Kinematics: 100% Fluid Continuous Traveling (Never Freezes, Never Stumbles)
+        cam_x = float(cam_x_frames[frame_idx])
+        cam_y = float(cam_y_frames[frame_idx])
 
-        if not cam_inited:
-            cam_x = target_cam_x
-            cam_y = target_cam_y
-            cam_inited = True
-        else:
-            if abs(target_cam_x - cam_x) > 700:
-                cam_x = target_cam_x - 100.0
-            else:
-                cam_x += (target_cam_x - cam_x) * 0.08
-            cam_y += (target_cam_y - cam_y) * 0.06
 
         # Camera shake driven by tension (strictly 0.0 when calm, subtle micro-tremor in tension)
         shake_x, shake_y = 0.0, 0.0
@@ -502,46 +725,64 @@ def render_ethereal_score_video(
                 blurred_score = cv2.blur(warped, (blur_amount, 1))
                 warped = cv2.addWeighted(warped, 0.65, blurred_score, 0.35, 0)
 
-        # Procedural Nebula background: Calm Celestial Sapphire Blue -> Radiant Wine Crimson
-        n1 = np.sin(grid_X * 1.5 + time_sec * 0.35) * np.cos(grid_Y * 1.8 - time_sec * 0.25)
-        n2 = np.sin(grid_X * 3.2 - time_sec * 0.55 + n1 * 0.8) * np.cos(grid_Y * 3.5 + time_sec * 0.45)
-        cloud_raw = np.clip((n1 * 0.6 + n2 * 0.4 + 1.0) * 0.5, 0.0, 1.0)
-        cloud_hd = cv2.resize(cloud_raw.astype(np.float32), (width, height), interpolation=cv2.INTER_CUBIC)
-
-        # Smooth blending weights between calm sapphire blue and intense wine crimson
-        w_calm = float((1.0 - cur_tension) ** 1.4)
-        w_tense = float(cur_tension ** 1.6)
-        w_sum = w_calm + w_tense
-        w_calm /= w_sum
-        w_tense /= w_sum
-
-        # Blue palette when calm (R~12-18, G~30-38, B~95-110)
-        # Crimson wine palette when tense (R~120-160, G~20-25, B~35-45)
-        cloud_r = np.clip((cloud_hd * 18.0 + 8.0) * w_calm + (cloud_hd * 120.0 + 35.0) * w_tense, 0, 255)
-        cloud_g = np.clip((cloud_hd * 38.0 + 14.0) * w_calm + (cloud_hd * 24.0 + 2.0) * w_tense, 0, 255)
-        cloud_b = np.clip((cloud_hd * 110.0 + 45.0) * w_calm + (cloud_hd * 42.0 + 5.0) * w_tense, 0, 255)
-
-        # Peripheral vignette keeping screen edges deep and focused
-        cloud_r = (cloud_r * bg_vignette).astype(np.uint8)
-        cloud_g = (cloud_g * bg_vignette).astype(np.uint8)
-        cloud_b = (cloud_b * bg_vignette).astype(np.uint8)
-        bg_frame = cv2.merge([cloud_b, cloud_g, cloud_r])
+        # Calm passages stay deep, elegant black ("deixar no preto por um tempo")
+        # Colors emerge gradually and stably as note density / tension builds
+        color_intensity = float(np.clip((cur_tension - 0.28) / 0.50, 0.0, 1.0) ** 1.6)
 
         # Composite score with 2D spotlight vignette
-        s_rgb = warped[:, :, :3].astype(np.float32)
-        s_alpha = (warped[:, :, 3] / 255.0)[:, :, np.newaxis]
-        # Apply 2D elliptical spotlight mask
-        s_alpha = s_alpha * spotlight_score
+        alpha_eff = cv2.multiply(warped[:, :, 3], spotlight_u8, scale=1.0/255.0)
 
-        frame = np.clip(s_rgb * s_alpha + bg_frame.astype(np.float32) * (1.0 - s_alpha), 0, 255).astype(np.uint8)
+        if color_intensity < 0.001:
+            b_s = cv2.multiply(warped[:, :, 0], alpha_eff, scale=1.0/255.0)
+            g_s = cv2.multiply(warped[:, :, 1], alpha_eff, scale=1.0/255.0)
+            r_s = cv2.multiply(warped[:, :, 2], alpha_eff, scale=1.0/255.0)
+            frame = cv2.merge([b_s, g_s, r_s])
+        else:
+            # Procedural Nebula background: Calm Celestial Sapphire Blue -> Radiant Wine Crimson
+            n1 = np.sin(grid_X * 1.5 + time_sec * 0.35) * np.cos(grid_Y * 1.8 - time_sec * 0.25)
+            n2 = np.sin(grid_X * 3.2 - time_sec * 0.55 + n1 * 0.8) * np.cos(grid_Y * 3.5 + time_sec * 0.45)
+            cloud_raw = np.clip((n1 * 0.6 + n2 * 0.4 + 1.0) * 0.5, 0.0, 1.0)
+            cloud_hd = cv2.resize(cloud_raw.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
+
+            w_calm = float((1.0 - cur_tension) ** 1.4)
+            w_tense = float(cur_tension ** 1.6)
+            w_sum = max(0.001, w_calm + w_tense)
+            w_calm /= w_sum
+            w_tense /= w_sum
+
+            neb_r = (cloud_hd * 20.0 + 10.0) * w_calm + (cloud_hd * 130.0 + 40.0) * w_tense
+            neb_g = (cloud_hd * 35.0 + 14.0) * w_calm + (cloud_hd * 24.0 + 2.0) * w_tense
+            neb_b = (cloud_hd * 105.0 + 40.0) * w_calm + (cloud_hd * 42.0 + 5.0) * w_tense
+
+            cloud_r = np.clip(neb_r * color_intensity, 0, 255)
+            cloud_g = np.clip(neb_g * color_intensity, 0, 255)
+            cloud_b = np.clip(neb_b * color_intensity, 0, 255)
+
+            cloud_r = (cloud_r * bg_vignette).astype(np.uint8)
+            cloud_g = (cloud_g * bg_vignette).astype(np.uint8)
+            cloud_b = (cloud_b * bg_vignette).astype(np.uint8)
+            bg_frame = cv2.merge([cloud_b, cloud_g, cloud_r])
+
+            inv_a = 255 - alpha_eff
+            b_s = cv2.multiply(warped[:, :, 0], alpha_eff, scale=1.0/255.0)
+            g_s = cv2.multiply(warped[:, :, 1], alpha_eff, scale=1.0/255.0)
+            r_s = cv2.multiply(warped[:, :, 2], alpha_eff, scale=1.0/255.0)
+
+            b_bg = cv2.multiply(bg_frame[:, :, 0], inv_a, scale=1.0/255.0)
+            g_bg = cv2.multiply(bg_frame[:, :, 1], inv_a, scale=1.0/255.0)
+            r_bg = cv2.multiply(bg_frame[:, :, 2], inv_a, scale=1.0/255.0)
+
+            frame = cv2.merge([cv2.add(b_s, b_bg), cv2.add(g_s, g_bg), cv2.add(r_s, r_bg)])
+
 
         # Draw pure white luminous flash on onset & persistent semi-illumination on played notes
         for n in illuminated_notes:
             dt = current_time_ms - n["on_ms"]
             is_sustaining = (current_time_ms <= n["off_ms"])
 
-            # Subtle initial onset flash (lasts ~110ms, gentle boost)
-            onset_flash = np.exp(-dt / 35.0) if dt < 120.0 else 0.0
+            # Subtle initial onset flash (lasts ~110ms, only for real struck onsets, not tied continuation notes)
+            is_real_onset = n.get("is_onset", True)
+            onset_flash = (np.exp(-dt / 35.0) if dt < 120.0 else 0.0) if is_real_onset else 0.0
 
             # Persistent gentle illumination on played notes ("meio iluminadas")
             if is_sustaining:
@@ -600,8 +841,11 @@ def render_ethereal_score_video(
             "ffmpeg", "-y",
             "-i", temp_raw_video,
             "-i", audio_path,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac",
+            "-b:a", "192k",
             "-shortest",
             output_video_path
         ]
