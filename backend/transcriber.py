@@ -238,6 +238,60 @@ def filter_acoustic_overtones_and_duplicates(note_events):
 
 filter_sympathetic_harmonics = filter_acoustic_overtones_and_duplicates
 
+def merge_decay_reattacks(notes, min_reattack_vel_ratio=0.75, min_reattack_abs_vel=38):
+    """
+    Merges false re-attacks caused by sustain pedal resonance and amplitude decay fluctuations.
+    If the same pitch is re-detected within 350ms with decaying velocity, it is merged into the parent note.
+    """
+    if len(notes) < 2:
+        return notes
+    sorted_notes = sorted(notes, key=lambda x: (x['midi_note'], x['onset_time']))
+    merged = []
+    skip = set()
+    for i in range(len(sorted_notes)):
+        if i in skip:
+            continue
+        n1 = dict(sorted_notes[i])
+        for j in range(i + 1, min(i + 6, len(sorted_notes))):
+            n2 = sorted_notes[j]
+            if n2['midi_note'] != n1['midi_note']:
+                break
+            gap = n2['onset_time'] - n1['offset_time']
+            if gap <= 0.35:
+                if n2['velocity'] < min_reattack_abs_vel or n2['velocity'] <= n1['velocity'] * min_reattack_vel_ratio:
+                    n1['offset_time'] = max(n1['offset_time'], n2['offset_time'])
+                    skip.add(j)
+                else:
+                    break
+            else:
+                break
+        merged.append(n1)
+    return sorted(merged, key=lambda x: x['onset_time'])
+
+def trim_melodic_step_overlaps(notes):
+    """
+    Enforces voice-leading monophonic release between consecutive melodic steps.
+    If a note in the melodic register (pitch >= 58) is followed by a stepwise note
+    (+/- 1 or 2 semitones, or octave-displaced stepwise intervals 11, 13 semitones),
+    the previous note's sustain is released when the new step is struck, preventing
+    accidental minor-second cluster collisions in sheet music chords.
+    """
+    sorted_notes = sorted(notes, key=lambda x: x['onset_time'])
+    for i in range(len(sorted_notes) - 1):
+        n1 = sorted_notes[i]
+        for j in range(i + 1, min(i + 8, len(sorted_notes))):
+            n2 = sorted_notes[j]
+            if n2['onset_time'] - n1['onset_time'] > 1.5:
+                break
+            diff = abs(n2['midi_note'] - n1['midi_note'])
+            if n1['midi_note'] >= 58 and diff in (1, 2):
+                if n1['offset_time'] > n2['onset_time']:
+                    n1['offset_time'] = n2['onset_time']
+            elif n1['midi_note'] >= 58 and diff in (11, 13):
+                if n1['offset_time'] > n2['onset_time']:
+                    n1['offset_time'] = n2['onset_time']
+    return sorted_notes
+
 def apply_pedal_to_durations(note_events, pedal_events, max_pedal_extension: float = 0.35):
     """
     Extends note offset_time if the sustain pedal is held down when the note ends.
@@ -563,6 +617,19 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
             continue
             
         all_pitches = sorted(list(set(all_pitches)))
+        
+        # Eliminate any minor-second semitone clashes (notehead collisions in chords)
+        if len(all_pitches) >= 2:
+            no_clashes = [all_pitches[0]]
+            for p in all_pitches[1:]:
+                if p - no_clashes[-1] == 1:
+                    # In melodic treble, prefer higher pitch; in bass, prefer lower fundamental root
+                    if p >= 60:
+                        no_clashes[-1] = p
+                    continue
+                no_clashes.append(p)
+            all_pitches = no_clashes
+            
         span = all_pitches[-1] - all_pitches[0]
         
         # 1. Octave Binding: 2 pitches exactly 12 or 24 semitones apart
@@ -723,9 +790,18 @@ def post_process_and_save_midi(
         
     # Filter sympathetic resonance ghost harmonics from acoustic piano bass strikes
     clean_note_events = filter_sympathetic_harmonics(clean_note_events)
+    
+    # Merge false re-attacks from sustain pedal decay / string amplitude beating
+    clean_note_events = merge_decay_reattacks(clean_note_events)
+    
+    # Trim voice-leading step overlaps (monophonic release in melodic register: eliminates semitone clashes)
+    clean_note_events = trim_melodic_step_overlaps(clean_note_events)
         
     # Apply pedal-to-duration to merge sustained notes (capped at 0.35s to prevent excessive ties)
     clean_note_events = apply_pedal_to_durations(clean_note_events, est_pedal_events, max_pedal_extension=0.35)
+    
+    # Re-apply trim after pedal extension to guarantee zero chord collisions
+    clean_note_events = trim_melodic_step_overlaps(clean_note_events)
     
     # Fetch beat_times_sec if available in output_dict
     beat_times_sec = output_dict.get('beat_times_sec', None)
@@ -949,10 +1025,43 @@ def sanitize_tuplets(score_or_stream, allow_triplets=True):
                             closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
                             n.duration = music21.duration.Duration(closest)
 
+def merge_all_ties_in_stream(s):
+    """
+    Merges any notes/chords that were prematurely split with ties by the MIDI parser,
+    re-combining them into continuous notes before measure allocation and staff splitting.
+    Prevents severed ties from becoming accidental repeated notes.
+    """
+    elements = sorted(list(s.recurse().notes), key=lambda x: x.offset)
+    by_pitch = {}
+    for el in elements:
+        pitches = tuple(sorted([p.nameWithOctave for p in el.pitches])) if el.isChord else (el.pitch.nameWithOctave,)
+        by_pitch.setdefault(pitches, []).append(el)
+        
+    to_remove = set()
+    for pitches, group in by_pitch.items():
+        for i in range(len(group) - 1):
+            el1 = group[i]
+            el2 = group[i+1]
+            if el1 in to_remove:
+                continue
+            gap = float(el2.offset - (el1.offset + el1.duration.quarterLength))
+            if abs(gap) < 0.05 and (el1.tie and el1.tie.type in ('start', 'continue')):
+                combined_ql = el1.duration.quarterLength + el2.duration.quarterLength
+                el1.duration = music21.duration.Duration(combined_ql)
+                el1.tie = el2.tie if el2.tie and el2.tie.type == 'continue' else None
+                to_remove.add(el2)
+                group[i+1] = el1
+                
+    for dead in to_remove:
+        s.remove(dead, recurse=True)
+    if to_remove:
+        print(f"[Tie Consolidator] Merged {len(to_remove)} prematurely fragmented tied notes.")
+
 def merge_intra_measure_ties(score):
     """
-    Merges notes that are tied to each other inside the same measure on the exact same pitch,
-    turning them into a single clean note with the combined duration and removing redundant ties.
+    1. Merges notes tied across internal beats in the same measure on identical pitch.
+    2. Consolidates untied adjacent same-pitch/chord stutters caused by acoustic decay
+       where a single held note was split into consecutive slices (e.g. dur2 <= 0.5).
     """
     for p in score.parts:
         for m in p.getElementsByClass('Measure'):
@@ -963,14 +1072,23 @@ def merge_intra_measure_ties(score):
                 for i in range(len(elements) - 1):
                     el1 = elements[i]
                     el2 = elements[i+1]
-                    if el1.tie and el1.tie.type == 'start' and el2.tie and el2.tie.type in ('stop', 'continue'):
-                        p1 = [p.nameWithOctave for p in el1.pitches] if el1.isChord else [el1.pitch.nameWithOctave]
-                        p2 = [p.nameWithOctave for p in el2.pitches] if el2.isChord else [el2.pitch.nameWithOctave]
-                        if p1 == p2:
-                            combined_ql = el1.duration.quarterLength + el2.duration.quarterLength
-                            el1.duration = music21.duration.Duration(combined_ql)
-                            el1.tie = el2.tie if el2.tie.type == 'continue' else None
-                            to_remove.append(el2)
+                    if el1 in to_remove:
+                        continue
+                    p1 = tuple(sorted([p.nameWithOctave for p in el1.pitches])) if el1.isChord else (el1.pitch.nameWithOctave,)
+                    p2 = tuple(sorted([p.nameWithOctave for p in el2.pitches])) if el2.isChord else (el2.pitch.nameWithOctave,)
+                    if p1 == p2:
+                        gap = float(el2.offset - (el1.offset + el1.duration.quarterLength))
+                        if abs(gap) < 0.05:
+                            is_tied = (el1.tie and el1.tie.type in ('start', 'continue'))
+                            # If tied OR if second note is a short stutter slice (dur <= 0.5)
+                            if is_tied or (float(el2.duration.quarterLength) <= 0.5):
+                                combined_ql = float(el1.duration.quarterLength + el2.duration.quarterLength)
+                                max_allowed = float(m.barDuration.quarterLength - el1.offset)
+                                combined_ql = min(combined_ql, max_allowed)
+                                el1.duration = music21.duration.Duration(combined_ql)
+                                el1.tie = el2.tie if (el2.tie and el2.tie.type == 'continue') else None
+                                to_remove.append(el2)
+                                elements[i+1] = el1
                 for dead_el in to_remove:
                     if dead_el in st:
                         st.remove(dead_el)
@@ -1016,6 +1134,7 @@ def quantize_and_export(
     
     print("Running Krumhansl-Schmuckler Key Analysis...")
     flat_stream = score_stream.flatten()
+    merge_all_ties_in_stream(flat_stream)
     best_key = flat_stream.analyze('key')
     print(f"Estimated Key: {best_key}")
     
