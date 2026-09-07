@@ -241,10 +241,20 @@ filter_sympathetic_harmonics = filter_acoustic_overtones_and_duplicates
 def merge_decay_reattacks(notes, min_reattack_vel_ratio=0.75, min_reattack_abs_vel=38):
     """
     Merges false re-attacks caused by sustain pedal resonance and amplitude decay fluctuations.
-    If the same pitch is re-detected within 350ms with decaying velocity, it is merged into the parent note.
+    CRITICAL:
+    1. Distance is measured from onset to onset (<= 0.32s), NOT from previous offset.
+    2. Multi-note chord attacks (>= 2 simultaneous onsets) are genuine musical chords and are NEVER merged.
     """
     if len(notes) < 2:
         return notes
+        
+    sorted_by_onset = sorted(notes, key=lambda x: x['onset_time'])
+    chord_onsets = set()
+    for i in range(len(sorted_by_onset) - 1):
+        if sorted_by_onset[i+1]['onset_time'] - sorted_by_onset[i]['onset_time'] < 0.045:
+            chord_onsets.add(round(sorted_by_onset[i]['onset_time'], 2))
+            chord_onsets.add(round(sorted_by_onset[i+1]['onset_time'], 2))
+
     sorted_notes = sorted(notes, key=lambda x: (x['midi_note'], x['onset_time']))
     merged = []
     skip = set()
@@ -256,13 +266,18 @@ def merge_decay_reattacks(notes, min_reattack_vel_ratio=0.75, min_reattack_abs_v
             n2 = sorted_notes[j]
             if n2['midi_note'] != n1['midi_note']:
                 break
-            gap = n2['onset_time'] - n1['offset_time']
-            if gap <= 0.35:
-                if n2['velocity'] < min_reattack_abs_vel or n2['velocity'] <= n1['velocity'] * min_reattack_vel_ratio:
-                    n1['offset_time'] = max(n1['offset_time'], n2['offset_time'])
-                    skip.add(j)
-                else:
-                    break
+                
+            attack_gap = n2['onset_time'] - n1['onset_time']
+            if attack_gap > 0.32:
+                break
+                
+            n2_round_t = round(n2['onset_time'], 2)
+            if n2_round_t in chord_onsets and len([x for x in sorted_by_onset if abs(x['onset_time'] - n2['onset_time']) < 0.045]) >= 2:
+                break
+                
+            if n2['velocity'] < min_reattack_abs_vel or n2['velocity'] <= n1['velocity'] * min_reattack_vel_ratio:
+                n1['offset_time'] = max(n1['offset_time'], n2['offset_time'])
+                skip.add(j)
             else:
                 break
         merged.append(n1)
@@ -951,8 +966,12 @@ def apply_diatonic_enharmonics(score_or_stream, key_obj):
         if isinstance(el, music21.note.Note):
             target = preferred_map.get(el.pitch.pitchClass)
             if target and el.pitch.name != target:
+                orig_tie = el.tie
                 el.pitch = respell_pitch(el.pitch, target)
+                el.tie = orig_tie
         elif isinstance(el, music21.chord.Chord):
+            orig_chord_tie = el.tie
+            orig_pitch_ties = [el.getTie(p) for p in el.pitches]
             new_pitches = []
             chord_pcs = {p.pitchClass for p in el.pitches}
             for p in el.pitches:
@@ -965,6 +984,11 @@ def apply_diatonic_enharmonics(score_or_stream, key_obj):
                 else:
                     new_pitches.append(p)
             el.pitches = tuple(new_pitches)
+            if orig_chord_tie:
+                el.tie = orig_chord_tie
+            for idx, ptie in enumerate(orig_pitch_ties):
+                if ptie and idx < len(el.pitches):
+                    el.setTie(ptie, el.pitches[idx])
 
 def sanitize_tuplets(score_or_stream, allow_triplets=True):
     """
@@ -1093,6 +1117,37 @@ def merge_intra_measure_ties(score):
                     if dead_el in st:
                         st.remove(dead_el)
 
+def link_cross_measure_ties(score):
+    """
+    Connects notes/chords across measure barlines that share the exact same pitch
+    and have no silence between them (i.e. note 1 ends at measure barline, note 2 starts at beat 0),
+    turning unintended repeated noteheads into proper musical ties (ligaduras).
+    """
+    for part in score.parts:
+        measures = list(part.getElementsByClass('Measure'))
+        for i in range(len(measures) - 1):
+            m1 = measures[i]
+            m2 = measures[i+1]
+            n1_list = list(m1.recurse().notes)
+            n2_list = list(m2.recurse().notes)
+            if not n1_list or not n2_list:
+                continue
+            n1 = n1_list[-1]
+            n2 = n2_list[0]
+            m1_dur = float(m1.barDuration.quarterLength)
+            if abs(float(n1.offset + n1.duration.quarterLength) - m1_dur) < 0.05 and abs(float(n2.offset)) < 0.05:
+                p1 = tuple(sorted([p.nameWithOctave for p in n1.pitches])) if n1.isChord else (n1.pitch.nameWithOctave,)
+                p2 = tuple(sorted([p.nameWithOctave for p in n2.pitches])) if n2.isChord else (n2.pitch.nameWithOctave,)
+                if p1 == p2:
+                    if not n1.tie:
+                        n1.tie = music21.tie.Tie('start')
+                    elif n1.tie.type == 'stop':
+                        n1.tie.type = 'continue'
+                    if not n2.tie:
+                        n2.tie = music21.tie.Tie('stop')
+                    elif n2.tie.type == 'start':
+                        n2.tie.type = 'continue'
+
 def quantize_and_export(
     raw_midi_path: str,
     output_xml_path: str,
@@ -1167,6 +1222,10 @@ def quantize_and_export(
     
     # Final enharmonic pass on split score
     apply_diatonic_enharmonics(split_score, best_key)
+    
+    # Connect notes crossing measure boundaries with legitimate musical ties (ligaduras)
+    print("Linking cross-measure ties...")
+    link_cross_measure_ties(split_score)
     
     # Export formats
     print(f"Exporting MusicXML to: {output_xml_path}")
