@@ -4,6 +4,7 @@ import shutil
 import music21
 import copy
 import numpy as np
+from fractions import Fraction
 
 import scipy.signal
 if not hasattr(scipy.signal, 'hann') and hasattr(scipy.signal, 'windows'):
@@ -363,9 +364,11 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
     if beat_times_sec is not None and len(beat_times_sec) >= 2:
         avg_ioi = np.mean(np.diff(beat_times_sec))
         librosa_bpm = 60.0 / max(0.01, avg_ioi)
-        # If detected bpm is slow (< 85 BPM) but librosa tracked eighth notes (> 115 BPM), downsample to beat unit
-        if bpm < 85.0 and librosa_bpm > 115.0:
-            beat_times_sec = beat_times_sec[::2]
+        # Check if librosa tracked eighth-note subdivisions (~2x detected BPM)
+        ratio = librosa_bpm / max(1.0, bpm)
+        if ratio >= 1.45:
+            step = int(round(ratio))
+            beat_times_sec = beat_times_sec[::step]
         beat_indices = np.arange(len(beat_times_sec))
         def get_beat(t):
             if t <= beat_times_sec[0]:
@@ -745,15 +748,29 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
                 gap = next_offset - offset
                 if gap > 0 and new_el.quarterLength > gap:
                     standard_lengths = [
-                        Fraction(1, 6), Fraction(1, 4), Fraction(1, 3), Fraction(3, 8),
+                        Fraction(1, 12), Fraction(1, 6), Fraction(1, 4), Fraction(1, 3), Fraction(3, 8),
                         Fraction(1, 2), Fraction(2, 3), Fraction(3, 4), Fraction(1, 1),
                         Fraction(3, 2), Fraction(2, 1), Fraction(3, 1), Fraction(4, 1)
                     ]
-                    valid = [s for s in standard_lengths if s <= gap + 0.02]
-                    chosen_dur = max(valid) if valid else Fraction(1, 4)
+                    valid = [s for s in standard_lengths if s <= gap]
+                    chosen_dur = max(valid) if valid else gap
                     new_el.duration = duration.Duration(chosen_dur)
                     
             part.insert(offset, new_el)
+
+        # Strict sanity pass to ensure exact rational grid and zero overlapping elements
+        for el in part.elements:
+            if isinstance(el, (note.Note, chord.Chord)):
+                el.offset = Fraction(round(float(el.offset) * 12), 12)
+                el.duration = duration.Duration(Fraction(round(float(el.duration.quarterLength) * 12), 12))
+
+        all_notes = [el for el in part.elements if isinstance(el, (note.Note, chord.Chord))]
+        for i in range(len(all_notes) - 1):
+            n1 = all_notes[i]
+            n2 = all_notes[i+1]
+            gap = n2.offset - n1.offset
+            if gap > 0 and n1.quarterLength > gap:
+                n1.duration = duration.Duration(gap)
 
     remove_polyphonic_overlaps(right_hand)
     remove_polyphonic_overlaps(left_hand)
@@ -1165,6 +1182,28 @@ def link_cross_measure_ties(score):
                     elif n2.tie.type == 'start':
                         n2.tie.type = 'continue'
 
+def clean_redundant_voices(score_stream):
+    """
+    Music21's makeNotation/makeVoices can create secondary voices containing only rests
+    when handling complex passages. In MusicXML, this emits 'voice 0' and 'voice 1' with
+    extra whole rests that double measure durations and break Verovio timing.
+    This function cleans up any voice containing zero notes, and collapses single-voice
+    measures back into standard measure streams.
+    """
+    for p in score_stream.parts:
+        for m in p.getElementsByClass('Measure'):
+            voices = list(m.getElementsByClass('Voice'))
+            if len(voices) > 1:
+                non_empty = [v for v in voices if len(list(v.recurse().notes)) > 0]
+                for v in voices:
+                    if v not in non_empty:
+                        m.remove(v)
+                if len(non_empty) == 1:
+                    v0 = non_empty[0]
+                    m.remove(v0)
+                    for el in list(v0.elements):
+                        m.insert(el.offset, el)
+
 def quantize_and_export(
     raw_midi_path: str,
     output_xml_path: str,
@@ -1224,18 +1263,27 @@ def quantize_and_export(
     print("Applying contextual diatonic enharmonic spelling...")
     apply_diatonic_enharmonics(split_score, best_key)
     
-    # Sanitize any irrational tuplets before notation
-    sanitize_tuplets(split_score, allow_triplets=allow_triplets)
-    
+    # Enforce strict non-overlapping notes with exact fraction durations before makeNotation
+    for p in split_score.parts:
+        for el in p.elements:
+            if isinstance(el, (music21.note.Note, music21.chord.Chord)):
+                el.offset = Fraction(round(float(el.offset) * 12), 12)
+                el.duration = music21.duration.Duration(Fraction(round(float(el.duration.quarterLength) * 12), 12))
+        notes = [e for e in p.elements if isinstance(e, (music21.note.Note, music21.chord.Chord))]
+        for i in range(len(notes) - 1):
+            n1 = notes[i]
+            n2 = notes[i + 1]
+            gap = n2.offset - n1.offset
+            if gap > 0 and n1.quarterLength > gap:
+                n1.duration = music21.duration.Duration(gap)
+
     print("Making well-formed notation with measures and ties...")
     split_score.makeNotation(inPlace=True)
+    clean_redundant_voices(split_score)
     
     # Merge redundant intra-measure ties
     print("Merging redundant intra-measure ties...")
     merge_intra_measure_ties(split_score)
-    
-    # Clean up any residual tuplets created by makeNotation
-    sanitize_tuplets(split_score, allow_triplets=allow_triplets)
     
     # Final enharmonic pass on split score
     apply_diatonic_enharmonics(split_score, best_key)
@@ -1243,6 +1291,7 @@ def quantize_and_export(
     # Connect notes crossing measure boundaries with legitimate musical ties (ligaduras)
     print("Linking cross-measure ties...")
     link_cross_measure_ties(split_score)
+    clean_redundant_voices(split_score)
     
     # Export formats
     print(f"Exporting MusicXML to: {output_xml_path}")

@@ -109,6 +109,13 @@ def render_ethereal_score_video(
     all_onsets.sort()
 
     total_duration_sec = (max_tstamp_ms / 1000.0) + 2.5
+    has_audio = audio_path and os.path.exists(audio_path)
+    if has_audio:
+        try:
+            audio_info_dur = librosa.get_duration(path=audio_path)
+            total_duration_sec = max(audio_info_dur, (max_tstamp_ms / 1000.0) + 1.0)
+        except Exception:
+            pass
     if max_duration_sec is not None:
         total_duration_sec = min(total_duration_sec, float(max_duration_sec))
     total_frames = max(60, int(fps * total_duration_sec))
