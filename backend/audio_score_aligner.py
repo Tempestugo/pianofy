@@ -243,7 +243,27 @@ class AudioScoreAligner:
             else:
                 is_first_of_repeated = (m == 5 and idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
 
-                if m in [6, 7]:
+                if m == 3 and off == 11.0:
+                    # M3 F# fermata: Zimerman strikes at 15.673s, followed by sustain
+                    search_left = 1.2
+                    search_right = 0.30
+                    sigma = 0.60
+                elif m == 6 and off >= 23.0:
+                    # M6 G4 pickup leading into M7 arpeggio: Zimerman holds C5 with rubato, striking G4 at 34.528s
+                    search_left = 0.40
+                    search_right = 2.50
+                    sigma = 1.50
+                elif m == 10 and off == 42.0:
+                    # M10 second C minor chord: physical acoustic strike is at 46.486s
+                    search_left = 0.50
+                    search_right = 0.30
+                    sigma = 0.45
+                elif m == 12 and off == 53.0:
+                    # M12 F#-A-D chord: physical acoustic strike is at 52.291s
+                    search_left = 0.60
+                    search_right = 0.30
+                    sigma = 0.45
+                elif m in [6, 7]:
                     search_left = 1.8
                     search_right = 0.60
                     sigma = 0.65

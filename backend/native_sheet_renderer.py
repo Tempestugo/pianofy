@@ -272,13 +272,19 @@ def render_ethereal_score_video(
                                         if tr_f:
                                             flag_max_x = (margin_x + float(tr_f.group(1))) * scale_x + 12.0
 
-                                nh_width = 24.0
-                                left_bound = (acc_x - 3.0) if acc_x is not None else (nx - 2.0)
+                                is_half = False
+                                if nh_u:
+                                    xlink = nh_u[0].get('{http://www.w3.org/1999/xlink}href', '')
+                                    if 'E0A3' in xlink or 'E0A2' in xlink:
+                                        is_half = True
+
+                                nh_width = 14.0 if is_half else 11.2
+                                left_bound = acc_x if acc_x is not None else nx
                                 bounds_candidates = [nx + nh_width]
                                 if stem_x is not None:
-                                    bounds_candidates.append(stem_x + 2.0)
+                                    bounds_candidates.append(stem_x + 1.0)
                                 if dot_max_x is not None:
-                                    bounds_candidates.append(dot_max_x + 3.0)
+                                    bounds_candidates.append(dot_max_x + 0.5)
                                 if flag_max_x is not None:
                                     bounds_candidates.append(flag_max_x)
                                 right_bound = max(bounds_candidates)
@@ -742,10 +748,14 @@ def render_ethereal_score_video(
                             last_k = k
                             break
                     curr_right = evs[last_k]["max_right"]
-                    # Stop strictly at the right boundary of the current event!
-                    # This prevents the connecting beam ("haste de conexão") from prematurely extending into empty space.
-                    # When the next note is struck, px advances, revealing both the next note and the connecting beam!
-                    px = int(curr_right + 1.5)
+                    next_left = evs[last_k+1]["min_left"]
+                    if curr_right < next_left:
+                        px = int((curr_right + next_left) / 2.0)
+                    else:
+                        px = int(next_left - 1) if next_left > evs[last_k]["min_left"] + 5 else int(curr_right)
+                    # Guaranteed protection: px must never slice into note k+1's accidental or notehead
+                    if px >= next_left and next_left > evs[last_k]["min_left"] + 5:
+                        px = int(next_left - 1)
                 page_comp[top:bot, :px] = current_page["img_full"][top:bot, :px]
 
         # 3. Musical Camera Kinematics: 100% Fluid Continuous Traveling (Never Freezes, Never Stumbles)
