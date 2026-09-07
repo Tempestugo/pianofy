@@ -71,7 +71,10 @@ def render_ethereal_score_video(
         max_tstamp_ms = max((v[1] for v in note_intervals.values()), default=10000)
     elif align_target and os.path.exists(align_target):
         try:
-            from audio_score_aligner import AudioScoreAligner
+            try:
+                from backend.audio_score_aligner import AudioScoreAligner
+            except ImportError:
+                from audio_score_aligner import AudioScoreAligner
             aligner = AudioScoreAligner(musicxml_path, audio_path=align_target)
             align_res = aligner.align(
                 max_measures=max_measures,

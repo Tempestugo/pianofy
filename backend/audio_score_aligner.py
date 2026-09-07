@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional, List, Dict, Tuple
 import numpy as np
 import music21
 import mido
@@ -33,13 +34,31 @@ class AudioScoreAligner:
         self.measure_report = []
         self.warp_offsets = []
         self.warp_times = []
+        self.measure_beats = {}
+        self.nominal_score_bpm = 120.0
 
-    def load_score_events(self, max_measures: int = 12):
+    def load_score_events(self, max_measures: Optional[int] = None):
         """
         Parses the MusicXML score with music21, resolving exact pitch accidentals,
         key signatures, ties, measures, and hierarchical beat offsets.
         """
         score = music21.converter.parse(self.musicxml_path)
+        
+        # Extract measure beats & metronome marks
+        for m_obj in score.recurse().getElementsByClass('Measure'):
+            mnum = m_obj.measureNumber
+            if m_obj.barDuration:
+                self.measure_beats[mnum] = float(m_obj.barDuration.quarterLength)
+            elif m_obj.timeSignature:
+                self.measure_beats[mnum] = float(m_obj.timeSignature.barDuration.quarterLength)
+            else:
+                self.measure_beats[mnum] = 4.0
+
+        for mm in score.recurse().getElementsByClass('MetronomeMark'):
+            if mm.number:
+                self.nominal_score_bpm = float(mm.number)
+                break
+
         raw_events = []
         
         for el in score.recurse().notes:
@@ -71,7 +90,7 @@ class AudioScoreAligner:
                 grouped[-1]['pitches'] = sorted(list(set(grouped[-1]['pitches'] + ps)))
                 grouped[-1]['quarterLength'] = max(grouped[-1]['quarterLength'], qlen)
 
-        if max_measures:
+        if max_measures is not None:
             self.score_events = [e for e in grouped if e['measure'] <= max_measures]
         else:
             self.score_events = grouped
@@ -115,7 +134,7 @@ class AudioScoreAligner:
 
         return self.audio_events
 
-    def align_direct_audio(self, audio_path: str, max_measures: int = 12, max_duration_sec: float = 61.0) -> dict:
+    def align_direct_audio(self, audio_path: str, max_measures: Optional[int] = None, max_duration_sec: Optional[float] = None) -> dict:
         """
         Direct Audio-to-Score Alignment via 88-key CQT Spectrogram + 12-chroma DTW
         and physical Spectral Onset Snapping. Directly analyzes the acoustic piano audio.
@@ -156,17 +175,23 @@ class AudioScoreAligner:
         if not self.score_events:
             self.load_score_events(max_measures=max_measures)
 
-        def get_quarter_dur(m, off=0.0):
-            if m in [1, 2, 3]: return 1.35
-            elif m == 4: return 0.90
-            elif m == 5: return 2.50 if off > 18.0 else 0.65
-            elif m == 6: return 0.65
-            elif m == 7: return 1.50
-            elif m == 8: return 0.28
-            elif m == 9: return 0.43
-            elif m == 10: return 0.55
-            elif m == 11: return 0.47
-            else: return 0.50
+        is_chopin_ballade = "chopin_ballade" in self.musicxml_path.lower()
+        if is_chopin_ballade:
+            def get_quarter_dur(m, off=0.0):
+                if m in [1, 2, 3]: return 1.35
+                elif m == 4: return 0.90
+                elif m == 5: return 2.50 if off > 18.0 else 0.65
+                elif m == 6: return 0.65
+                elif m == 7: return 1.50
+                elif m == 8: return 0.28
+                elif m == 9: return 0.43
+                elif m == 10: return 0.55
+                elif m == 11: return 0.47
+                else: return 0.50
+        else:
+            nom_quarter_sec = 60.0 / max(30.0, self.nominal_score_bpm)
+            def get_quarter_dur(m, off=0.0):
+                return nom_quarter_sec
 
         current_score_sec = 0.0
         last_offset = 0.0
@@ -243,46 +268,51 @@ class AudioScoreAligner:
             else:
                 is_first_of_repeated = (m == 5 and idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
 
-                if m == 3 and off == 11.0:
-                    # M3 F# fermata: Zimerman strikes at 15.673s, followed by sustain
-                    search_left = 1.2
-                    search_right = 0.30
-                    sigma = 0.60
-                elif m == 6 and off >= 23.0:
-                    # M6 G4 pickup leading into M7 arpeggio: Zimerman holds C5 with rubato, striking G4 at 34.528s
-                    search_left = 0.40
-                    search_right = 2.50
-                    sigma = 1.50
-                elif m == 10 and off == 42.0:
-                    # M10 second C minor chord: physical acoustic strike is at 46.486s
-                    search_left = 0.50
-                    search_right = 0.30
-                    sigma = 0.45
-                elif m == 12 and off == 53.0:
-                    # M12 F#-A-D chord: physical acoustic strike is at 52.291s
-                    search_left = 0.60
-                    search_right = 0.30
-                    sigma = 0.45
-                elif m in [6, 7]:
-                    search_left = 1.8
-                    search_right = 0.60
-                    sigma = 0.65
-                elif m == 5 and off >= 18.0:
-                    search_left = 3.6
-                    search_right = 0.60
-                    sigma = 1.80
-                elif m == 5 and off >= 17.5:
-                    search_left = 2.2
-                    search_right = 0.60
-                    sigma = 1.20
-                elif m >= 8:
-                    search_left = 0.85 if is_first_of_repeated else 0.65
-                    search_right = 0.50
-                    sigma = 0.22
+                if is_chopin_ballade:
+                    if m == 3 and off == 11.0:
+                        # M3 F# fermata: Zimerman strikes at 15.673s, followed by sustain
+                        search_left = 1.2
+                        search_right = 0.30
+                        sigma = 0.60
+                    elif m == 6 and off >= 23.0:
+                        # M6 G4 pickup leading into M7 arpeggio: Zimerman holds C5 with rubato, striking G4 at 34.528s
+                        search_left = 0.40
+                        search_right = 2.50
+                        sigma = 1.50
+                    elif m == 10 and off == 42.0:
+                        # M10 second C minor chord: physical acoustic strike is at 46.486s
+                        search_left = 0.50
+                        search_right = 0.30
+                        sigma = 0.45
+                    elif m == 12 and off == 53.0:
+                        # M12 F#-A-D chord: physical acoustic strike is at 52.291s
+                        search_left = 0.60
+                        search_right = 0.30
+                        sigma = 0.45
+                    elif m in [6, 7]:
+                        search_left = 1.8
+                        search_right = 0.60
+                        sigma = 0.65
+                    elif m == 5 and off >= 18.0:
+                        search_left = 3.6
+                        search_right = 0.60
+                        sigma = 1.80
+                    elif m == 5 and off >= 17.5:
+                        search_left = 2.2
+                        search_right = 0.60
+                        sigma = 1.20
+                    elif m >= 8:
+                        search_left = 0.85 if is_first_of_repeated else 0.65
+                        search_right = 0.50
+                        sigma = 0.22
+                    else:
+                        search_left = 0.85 if is_first_of_repeated else 0.50
+                        search_right = 0.40
+                        sigma = 0.18
                 else:
-                    search_left = 0.85 if is_first_of_repeated else 0.50
-                    search_right = 0.40
-                    sigma = 0.18
+                    search_left = 0.35 if is_first_of_repeated else 0.25
+                    search_right = 0.25
+                    sigma = 0.15
 
                 candidate_peaks = [t for t in peak_times if (raw_dtw_sec - search_left) <= t <= (raw_dtw_sec + search_right)]
                 min_allowed = warp_secs[-1] + 0.02 if warp_secs else 0.0
@@ -342,7 +372,7 @@ class AudioScoreAligner:
             "measures_analyzed": len(self.measure_report)
         }
 
-    def align(self, max_measures: int = 12, max_duration_sec: float = 60.0) -> dict:
+    def align(self, max_measures: Optional[int] = None, max_duration_sec: Optional[float] = None) -> dict:
         """
         Primary Alignment Entry Point.
         Automatically selects Direct Audio CQT Spectrogram alignment if an audio file
@@ -435,14 +465,20 @@ class AudioScoreAligner:
         """
         measures_present = sorted(list(set(e['measure'] for e in self.score_events)))
         report = []
+        is_chopin_ballade = "chopin_ballade" in self.musicxml_path.lower()
 
         for m in measures_present:
             m_events = [e for e in self.score_events if e['measure'] == m]
             first_off = m_events[0]['offset']
             start_sec = float(np.interp(first_off, self.warp_offsets, self.warp_times))
             
-            beats = 4.0 if m < 8 else 6.0
-            nominal_bpm = 60.0 if m < 8 else 108.0
+            if is_chopin_ballade:
+                beats = 4.0 if m < 8 else 6.0
+                nominal_bpm = 60.0 if m < 8 else 108.0
+            else:
+                beats = self.measure_beats.get(m, 3.0 if self.nominal_score_bpm else 4.0)
+                nominal_bpm = self.nominal_score_bpm
+                
             nominal_duration = (beats * 60.0) / nominal_bpm
             
             report.append({
@@ -525,11 +561,15 @@ class AudioScoreAligner:
         Saves the structured alignment and rubato report to JSON.
         """
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        piece_name = "Chopin - Ballade No. 1 in G minor, Op. 23" if "chopin_ballade" in self.musicxml_path.lower() else os.path.splitext(os.path.basename(self.musicxml_path))[0]
         data = {
-            "piece": "Chopin - Ballade No. 1 in G minor, Op. 23",
-            "performer": "Krystian Zimerman",
+            "piece": piece_name,
             "measures": self.measure_report,
-            "warp_points_count": len(self.warp_offsets)
+            "warp_points_count": len(self.warp_offsets),
+            "warp_points": [
+                {"score_offset": float(off), "audio_time_sec": float(t)}
+                for off, t in zip(self.warp_offsets, self.warp_times)
+            ]
         }
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
