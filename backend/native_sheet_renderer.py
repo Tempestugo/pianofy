@@ -726,10 +726,10 @@ def render_ethereal_score_video(
             n for n in active_sys["notes"]
             if n["on_ms"] <= current_time_ms <= n["off_ms"]
         ]
-        # Notes played so far on current page (to keep softly illuminated within viewport)
+        # Notes played so far on current page (including 30ms tactile attack anticipation)
         illuminated_notes = [
             n for n in current_page["notes"]
-            if n["on_ms"] <= current_time_ms
+            if n["on_ms"] - 30.0 <= current_time_ms
         ]
 
         # Calculate playhead_x for active system
@@ -880,9 +880,15 @@ def render_ethereal_score_video(
             dt = current_time_ms - n["on_ms"]
             is_sustaining = (current_time_ms <= n["off_ms"])
 
-            # Subtle initial onset flash (lasts ~110ms, only for real struck onsets, not tied continuation notes)
+            # Tactile initial onset flash (lasts ~120ms with 30ms physical hammer anticipation rise)
             is_real_onset = n.get("is_onset", True)
-            onset_flash = (np.exp(-dt / 35.0) if dt < 120.0 else 0.0) if is_real_onset else 0.0
+            if is_real_onset and -30.0 <= dt < 120.0:
+                if dt < 0.0:
+                    onset_flash = (dt + 30.0) / 30.0
+                else:
+                    onset_flash = np.exp(-dt / 35.0)
+            else:
+                onset_flash = 0.0
 
             # Persistent gentle illumination on played notes ("meio iluminadas")
             if is_sustaining:

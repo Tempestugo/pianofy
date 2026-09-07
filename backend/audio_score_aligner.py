@@ -193,8 +193,9 @@ class AudioScoreAligner:
             def get_quarter_dur(m, off=0.0):
                 return nom_quarter_sec
 
+        first_score_offset = self.score_events[0]['offset'] if self.score_events else 0.0
         current_score_sec = 0.0
-        last_offset = 0.0
+        last_offset = first_score_offset
         note_timeline = []
 
         for e in self.score_events:
@@ -263,7 +264,7 @@ class AudioScoreAligner:
             matched_audio_f = np.median(matches[:, 1]) if len(matches) > 0 else np.interp(score_f, wp[:, 0], wp[:, 1])
             raw_dtw_sec = float((matched_audio_f + first_sound_frame) * score_hop)
 
-            if off == 0.0:
+            if off == first_score_offset:
                 real_sec = first_sound_time
             else:
                 is_first_of_repeated = (m == 5 and idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
