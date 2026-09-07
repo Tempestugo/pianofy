@@ -127,7 +127,7 @@ class AudioScoreAligner:
 
         # 1. Load Audio
         y, _ = librosa.load(audio_path, sr=sr)
-        audio_dur = min(len(y) / sr, max_duration_sec)
+        audio_dur = min(len(y) / sr, float(max_duration_sec)) if max_duration_sec is not None else (len(y) / sr)
         y = y[:int(audio_dur * sr)]
 
         # 2. Detect first significant acoustic note attack (ignoring leading room noise)

@@ -19,6 +19,7 @@ def render_ethereal_score_video(
     zoom: float = 1.85,
     progress_callback = None,
     max_duration_sec: float = None,
+    max_measures: int = None,
     align_to_audio_midi: str = None,
     align_to_audio_file: str = None,
     custom_note_intervals: dict = None
@@ -72,7 +73,10 @@ def render_ethereal_score_video(
         try:
             from audio_score_aligner import AudioScoreAligner
             aligner = AudioScoreAligner(musicxml_path, audio_path=align_target)
-            align_res = aligner.align(max_measures=12, max_duration_sec=float(max_duration_sec) if max_duration_sec else 60.0)
+            align_res = aligner.align(
+                max_measures=max_measures,
+                max_duration_sec=float(max_duration_sec) if max_duration_sec is not None else None
+            )
             print(f"[AudioScoreAligner] Direct alignment success: {align_res}")
             note_intervals = aligner.generate_verovio_aligned_timemap(tk)
             all_onsets = sorted([v[0] for v in note_intervals.values() if v[2]])
