@@ -354,6 +354,12 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
     if not note_events:
         return []
         
+    if isinstance(bpm, str):
+        try:
+            bpm = float(bpm)
+        except ValueError:
+            bpm = 120.0
+        
     if beat_times_sec is not None and len(beat_times_sec) >= 2:
         avg_ioi = np.mean(np.diff(beat_times_sec))
         librosa_bpm = 60.0 / max(0.01, avg_ioi)
@@ -788,6 +794,16 @@ def post_process_and_save_midi(
     
     (est_note_events, est_pedal_events) = post_processor.output_dict_to_midi_events(output_dict)
     
+    # Auto-resolve bpm and time_signature if "auto" was passed
+    if bpm == "auto" or time_signature == "auto":
+        det_bpm, det_meter = estimate_bpm_and_meter(est_note_events)
+        if bpm == "auto":
+            bpm = det_bpm
+        if time_signature == "auto":
+            time_signature = det_meter
+    else:
+        bpm = float(bpm)
+    
     min_duration_sec = min_duration_ms / 1000.0
     filtered_note_events = []
     for note in est_note_events:
@@ -844,6 +860,7 @@ def post_process_and_save_midi(
         midi_path=raw_midi_path
     )
     print("Raw MIDI updated successfully.")
+    return confidence_threshold, min_duration_ms, bpm, time_signature
 
 def transcribe_audio_to_raw_midi(
     audio_path: str,
