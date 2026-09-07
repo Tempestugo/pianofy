@@ -172,37 +172,71 @@ def filter_finger_slips(note_events):
         kept.append(note_ev)
     return kept
 
-def filter_sympathetic_harmonics(note_events):
+def filter_acoustic_overtones_and_duplicates(note_events):
     """
-    Filters out ghost notes caused by acoustic piano sympathetic resonance.
-    When a loud bass note is struck (MIDI < 48, velocity >= 60), faint notes
-    (velocity < 45, velocity diff >= 20) that appear at harmonic intervals
-    (+12, +19, +24, +28 semitones) within 80ms of the bass note onset are pruned.
+    Filters out ghost notes caused by acoustic piano harmonic overtones and duplicate note triggers:
+    1. Merges duplicate note events on the exact same pitch within 45ms.
+    2. Prunes acoustic overtone ghosts (+12, +19, +24 semitones) that have weak velocity
+       compared to the fundamental note strike.
     """
     if len(note_events) < 2:
         return note_events
         
-    sorted_notes = sorted(note_events, key=lambda x: x['onset_time'])
-    harmonic_intervals = {12, 19, 24, 28} # Octave, 12th, 2 octaves, 2 octaves + maj 3rd
+    # 1. Merge exact duplicate note events on same pitch within 45ms
+    sorted_notes = sorted(note_events, key=lambda x: (x['onset_time'], x['midi_note']))
+    deduped = []
+    skip_indices = set()
+    for i in range(len(sorted_notes)):
+        if i in skip_indices:
+            continue
+        n1 = sorted_notes[i]
+        merged_n = dict(n1)
+        for j in range(i + 1, min(i + 8, len(sorted_notes))):
+            n2 = sorted_notes[j]
+            if n2['onset_time'] - n1['onset_time'] > 0.045:
+                break
+            if n2['midi_note'] == n1['midi_note']:
+                # Duplicate trigger: merge duration and take max velocity
+                merged_n['offset_time'] = max(merged_n['offset_time'], n2['offset_time'])
+                merged_n['velocity'] = max(merged_n['velocity'], n2['velocity'])
+                skip_indices.add(j)
+        deduped.append(merged_n)
+
+    # 2. Filter sympathetic resonance & acoustic overtone ghosts (+12, +19, +24 st)
+    deduped.sort(key=lambda x: x['onset_time'])
     pruned_indices = set()
-    
-    for i, bass in enumerate(sorted_notes):
-        if bass['midi_note'] < 48 and bass['velocity'] >= 60:
-            b_onset = bass['onset_time']
-            for j in range(i + 1, min(i + 20, len(sorted_notes))):
-                candidate = sorted_notes[j]
-                if candidate['onset_time'] - b_onset > 0.080:
-                    break
+    for i, fund in enumerate(deduped):
+        f_onset = fund['onset_time']
+        f_pitch = fund['midi_note']
+        f_vel = fund['velocity']
+        
+        for j in range(i + 1, min(i + 20, len(deduped))):
+            cand = deduped[j]
+            if cand['onset_time'] - f_onset > 0.045:
+                break
+            interval = cand['midi_note'] - f_pitch
+            c_vel = cand['velocity']
+            
+            # Twelfth (+19 st): 3rd harmonic
+            if interval == 19 and (c_vel < 0.65 * f_vel or c_vel < 45):
+                pruned_indices.add(j)
+            # Double octave (+24 st): 4th harmonic
+            elif interval == 24 and (c_vel < 0.55 * f_vel or c_vel < 40):
+                pruned_indices.add(j)
+            # Octave (+12 st): 2nd harmonic
+            # Real played octaves have comparable velocity (c_vel >= 0.6 * f_vel).
+            elif interval == 12:
+                if f_pitch < 48 and c_vel < 45 and (f_vel - c_vel) >= 18:
+                    pruned_indices.add(j)
+                elif c_vel < 0.48 * f_vel and c_vel < 38:
+                    pruned_indices.add(j)
                     
-                interval = candidate['midi_note'] - bass['midi_note']
-                if interval in harmonic_intervals:
-                    if candidate['velocity'] < 45 and (bass['velocity'] - candidate['velocity']) >= 20:
-                        pruned_indices.add(j)
-                        print(f"[Ghost Filter] Pruned sympathetic ghost note MIDI {candidate['midi_note']} (+{interval} st) at {candidate['onset_time']:.2f}s")
-                        
-    if pruned_indices:
-        print(f"[Ghost Filter] Removed {len(pruned_indices)} sympathetic harmonic ghost notes.")
-    return [n for idx, n in enumerate(sorted_notes) if idx not in pruned_indices]
+    clean = [n for idx, n in enumerate(deduped) if idx not in pruned_indices]
+    if len(clean) != len(note_events):
+        print(f"[Acoustic Filter] Processed {len(note_events)} -> {len(clean)} notes ({len(note_events) - len(clean)} duplicates/ghosts removed).")
+    return clean
+
+filter_sympathetic_harmonics = filter_acoustic_overtones_and_duplicates
 
 def apply_pedal_to_durations(note_events, pedal_events, max_pedal_extension: float = 0.35):
     """
@@ -275,23 +309,45 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
     # Sort notes by onset
     sorted_notes = sorted(note_events, key=lambda x: x['onset_time'])
     
-    # Determine grid resolution (12.0 allows both binary 1/4 and ternary 1/3 beat snapping)
-    grid = 12.0 if (allow_triplets or time_signature == "6/8") else 4.0
-    min_dur_beat = 0.25 # minimum 1/16 note (0.25 beats)
-    if grid == 12.0:
-        min_dur_beat = 0.1667 # 1/6 beat or 1/12 beat
-        
-    # Convert to beat space
-    beat_notes = []
+    # Convert notes to beat space and analyze beat-level triplet density (Dorico-style)
+    notes_with_beats = []
     for n in sorted_notes:
         onset_beat = float(get_beat(n['onset_time']))
         offset_beat = float(get_beat(n['offset_time']))
-        duration_beat = max(0.01, offset_beat - onset_beat)
+        notes_with_beats.append({
+            'raw_onset_beat': onset_beat,
+            'raw_offset_beat': offset_beat,
+            'midi_note': n['midi_note'],
+            'velocity': n['velocity']
+        })
         
-        # Snap onset to grid
+    triplet_beats = set()
+    if allow_triplets or time_signature == "6/8":
+        beats_map = {}
+        for n in notes_with_beats:
+            b_floor = int(np.floor(n['raw_onset_beat']))
+            beats_map.setdefault(b_floor, []).append(n['raw_onset_beat'])
+            
+        for b_floor, onsets in beats_map.items():
+            if len(onsets) >= 3:
+                unique_onsets = sorted(list(set([round(o, 2) for o in onsets])))
+                if len(unique_onsets) >= 3:
+                    diffs = np.diff(unique_onsets)
+                    triplet_matches = sum(1 for d in diffs if 0.23 <= d <= 0.42)
+                    if triplet_matches >= 2:
+                        triplet_beats.add(b_floor)
+                        print(f"[Dorico Quantizer] Detected genuine triplet group in beat {b_floor}")
+
+    beat_notes = []
+    for n in notes_with_beats:
+        b_floor = int(np.floor(n['raw_onset_beat']))
+        grid = 12.0 if b_floor in triplet_beats else 4.0
+        min_dur_beat = 0.1667 if grid == 12.0 else 0.25
+        
+        onset_beat = n['raw_onset_beat']
+        duration_beat = max(0.01, n['raw_offset_beat'] - onset_beat)
+        
         snap_onset = round(onset_beat * grid) / grid
-        
-        # Round duration to grid
         snap_dur = round(duration_beat * grid) / grid
         if snap_dur < min_dur_beat:
             snap_dur = min_dur_beat
@@ -464,8 +520,18 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
         right_hand.insert(0, meter.TimeSignature(time_signature))
         left_hand.insert(0, meter.TimeSignature(time_signature))
         
-    # Dynamic split state
-    current_split = split_point
+    # Find offsets where true bass notes (<= 48 / C3) sound to track active LH accompaniment
+    bass_offsets = set()
+    for element in flat_stream:
+        if isinstance(element, (note.Note, chord.Chord)):
+            for p in element.pitches:
+                if p.midi <= 48:
+                    bass_offsets.add(element.offset)
+                    
+    def has_nearby_bass(off, window=3.0):
+        return any(abs(off - b_off) <= window for b_off in bass_offsets)
+        
+    current_split = float(split_point)
 
     # Group elements by offset to process chords/simultaneous notes together
     elements_by_offset = {}
@@ -478,74 +544,69 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
     for offset in sorted(elements_by_offset.keys()):
         group = elements_by_offset[offset]
         
+        # Check for KeySignatures
         for element in group:
             if isinstance(element, key.KeySignature):
                 right_hand.insert(offset, copy.deepcopy(element))
                 left_hand.insert(offset, copy.deepcopy(element))
-                continue
                 
-            # Extract all pitches at this offset for dynamic split evaluation
-            pitches = []
-            if isinstance(element, note.Note):
-                pitches.append(element.pitch.midi)
-            elif isinstance(element, chord.Chord):
-                pitches.extend([p.midi for p in element.pitches])
-                
-            if pitches:
-                # If we have multiple pitches, find a large gap to split
-                pitches.sort()
-                if len(pitches) >= 2:
-                    max_gap = 0
-                    best_split = current_split
-                    for i in range(len(pitches) - 1):
-                        gap = pitches[i+1] - pitches[i]
-                        if gap > max_gap:
-                            max_gap = gap
-                            # Split exactly in the middle of the largest gap
-                            best_split = pitches[i] + (gap / 2.0)
-                            
-                    # Smooth the split point (inertia)
-                    if max_gap >= 7: # at least a fifth gap to justify moving split
-                        current_split = (current_split * 0.7) + (best_split * 0.3)
-                else:
-                    # Single note: slightly pull split point towards center if it's very far
-                    p = pitches[0]
-                    if p > 72: # very high
-                        current_split = (current_split * 0.9) + (65 * 0.1)
-                    elif p < 48: # very low
-                        current_split = (current_split * 0.9) + (55 * 0.1)
+        # Gather all pitches and max duration at this offset
+        all_pitches = []
+        max_dur = None
+        for el in group:
+            if isinstance(el, (note.Note, chord.Chord)):
+                all_pitches.extend([p.midi for p in el.pitches])
+                if max_dur is None or el.duration.quarterLength > max_dur.quarterLength:
+                    max_dur = el.duration
+                    
+        if not all_pitches:
+            continue
             
-            # Now assign notes
-            if isinstance(element, note.Note):
-                if element.pitch.midi >= current_split:
-                    right_hand.insert(offset, element)
-                else:
-                    left_hand.insert(offset, element)
-            elif isinstance(element, chord.Chord):
-                treble_pitches = [p for p in element.pitches if p.midi >= current_split]
-                bass_pitches = [p for p in element.pitches if p.midi < current_split]
+        all_pitches = sorted(list(set(all_pitches)))
+        span = all_pitches[-1] - all_pitches[0]
+        
+        # 1. Octave Binding: 2 pitches exactly 12 or 24 semitones apart
+        if len(all_pitches) == 2 and (all_pitches[1] - all_pitches[0] in (12, 24)):
+            min_p = all_pitches[0]
+            if min_p >= 48 or not has_nearby_bass(offset):
+                n = chord.Chord(all_pitches, duration=copy.deepcopy(max_dur))
+                right_hand.insert(offset, n)
+            else:
+                n = chord.Chord(all_pitches, duration=copy.deepcopy(max_dur))
+                left_hand.insert(offset, n)
+            continue
+            
+        # 2. Compact Hand Span (span <= 14 semitones - played by one hand)
+        if span <= 14:
+            min_p = all_pitches[0]
+            max_p = all_pitches[-1]
+            n = note.Note(all_pitches[0], duration=copy.deepcopy(max_dur)) if len(all_pitches) == 1 else chord.Chord(all_pitches, duration=copy.deepcopy(max_dur))
+            if min_p >= 53 or not has_nearby_bass(offset):
+                right_hand.insert(offset, n)
+            elif max_p <= 55:
+                left_hand.insert(offset, n)
+            elif min_p >= 48:
+                right_hand.insert(offset, n)
+            else:
+                left_hand.insert(offset, n)
+            continue
+            
+        # 3. Wide Multi-Voice (span > 14 semitones - split across hands)
+        treble_pitches = [p for p in all_pitches if p >= current_split]
+        bass_pitches = [p for p in all_pitches if p < current_split]
+        
+        # Grand Staff Hand Balancing
+        if not bass_pitches and len(all_pitches) >= 3:
+            if all_pitches[0] <= 65:
+                bass_pitches = [all_pitches[0]]
+                treble_pitches = all_pitches[1:]
                 
-                # Grand Staff Balancing: if bass is empty and chord has >= 3 notes with lowest pitch <= 65 (F4 or lower)
-                if not bass_pitches and len(element.pitches) >= 3:
-                    sorted_pitches = sorted(element.pitches, key=lambda x: x.midi)
-                    if sorted_pitches[0].midi <= 65:
-                        bass_pitches = [sorted_pitches[0]]
-                        treble_pitches = sorted_pitches[1:]
-                
-                if treble_pitches:
-                    n_dur = copy.deepcopy(element.duration)
-                    if len(treble_pitches) == 1:
-                        n = note.Note(treble_pitches[0], duration=n_dur)
-                    else:
-                        n = chord.Chord(treble_pitches, duration=n_dur)
-                    right_hand.insert(offset, n)
-                if bass_pitches:
-                    n_dur = copy.deepcopy(element.duration)
-                    if len(bass_pitches) == 1:
-                        n = note.Note(bass_pitches[0], duration=n_dur)
-                    else:
-                        n = chord.Chord(bass_pitches, duration=n_dur)
-                    left_hand.insert(offset, n)
+        if treble_pitches:
+            n = note.Note(treble_pitches[0], duration=copy.deepcopy(max_dur)) if len(treble_pitches) == 1 else chord.Chord(treble_pitches, duration=copy.deepcopy(max_dur))
+            right_hand.insert(offset, n)
+        if bass_pitches:
+            n = note.Note(bass_pitches[0], duration=copy.deepcopy(max_dur)) if len(bass_pitches) == 1 else chord.Chord(bass_pitches, duration=copy.deepcopy(max_dur))
+            left_hand.insert(offset, n)
 
     # Post-process parts to remove polyphonic overlaps and excessive rests
     def remove_polyphonic_overlaps(part):
@@ -831,10 +892,11 @@ def apply_diatonic_enharmonics(score_or_stream, key_obj):
 
 def sanitize_tuplets(score_or_stream, allow_triplets=True):
     """
-    Sanitizes all tuplets in the score:
+    Sanitizes all tuplets in the score (Dorico-style):
     - Strips irrational micro-tuplets (e.g. 24:23, 24:13, 19:22, 10:7, 5:4)
-    - Snaps note quarterLength to the nearest standard musical fraction
-    - Retains only canonical triplets (3:2 or 6:4) if allow_triplets is True
+    - Enforces closed tuplet group validation: a tuplet must have both 'start' and 'stop'.
+    - Eliminates isolated 'startStop' single-note tuplets caused by rubato.
+    - Snaps note quarterLength to the nearest standard musical fraction.
     """
     from fractions import Fraction
     standard_lengths = [
@@ -842,18 +904,50 @@ def sanitize_tuplets(score_or_stream, allow_triplets=True):
         Fraction(1, 2), Fraction(2, 3), Fraction(3, 4), Fraction(1, 1),
         Fraction(3, 2), Fraction(2, 1), Fraction(3, 1), Fraction(4, 1)
     ]
-    for el in score_or_stream.recurse().notes:
-        if el.duration.tuplets:
-            valid_tuplets = []
-            if allow_triplets:
-                for tup in el.duration.tuplets:
-                    if tup.numberNotesActual in (3, 6) and tup.numberNotesNormal in (2, 4):
-                        valid_tuplets.append(tup)
+    
+    parts = getattr(score_or_stream, 'parts', [score_or_stream])
+    for p in parts:
+        measures = p.getElementsByClass('Measure')
+        if not measures:
+            measures = [p]
+        for m in measures:
+            tuplet_notes = [n for n in m.recurse().notes if n.duration.tuplets]
+            if not tuplet_notes:
+                continue
+                
+            types = [t.type for n in tuplet_notes for t in n.duration.tuplets]
+            ratios = [(t.numberNotesActual, t.numberNotesNormal) for n in tuplet_notes for t in n.duration.tuplets]
             
-            if len(valid_tuplets) != len(el.duration.tuplets):
-                curr_ql = Fraction(str(round(float(el.duration.quarterLength), 4)))
-                closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
-                el.duration = music21.duration.Duration(closest)
+            # Non-standard tuplets
+            if not allow_triplets or any(r not in [(3, 2), (6, 4)] for r in ratios):
+                for n in tuplet_notes:
+                    n.duration.tuplets = ()
+                    curr_ql = Fraction(str(round(float(n.duration.quarterLength), 4)))
+                    closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
+                    n.duration = music21.duration.Duration(closest)
+                continue
+                
+            # Strict Dorico Group Coherence: must have both start and stop, and no isolated startStop
+            if 'startStop' in types or len(tuplet_notes) < 2 or not ('start' in types and 'stop' in types):
+                for n in tuplet_notes:
+                    n.duration.tuplets = ()
+                    curr_ql = Fraction(str(round(float(n.duration.quarterLength), 4)))
+                    closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
+                    n.duration = music21.duration.Duration(closest)
+            else:
+                # Clean up any orphaned None notes not bounded between start and stop
+                in_group = False
+                for n in tuplet_notes:
+                    for d in list(n.duration.tuplets):
+                        if d.type == 'start':
+                            in_group = True
+                        elif d.type == 'stop':
+                            in_group = False
+                        elif d.type is None and not in_group:
+                            n.duration.tuplets = ()
+                            curr_ql = Fraction(str(round(float(n.duration.quarterLength), 4)))
+                            closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
+                            n.duration = music21.duration.Duration(closest)
 
 def merge_intra_measure_ties(score):
     """
