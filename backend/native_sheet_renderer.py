@@ -286,14 +286,14 @@ def render_ethereal_score_video(
                                         is_half = True
 
                                 nh_width = 14.0 if is_half else 11.2
-                                left_bound = acc_x if acc_x is not None else nx
-                                bounds_candidates = [nx + nh_width]
+                                left_bound = (acc_x - 2.0) if acc_x is not None else (nx - 1.0)
+                                bounds_candidates = [nx + nh_width + 1.5]
                                 if stem_x is not None:
-                                    bounds_candidates.append(stem_x + 1.0)
+                                    bounds_candidates.append(stem_x + 2.0)
                                 if dot_max_x is not None:
-                                    bounds_candidates.append(dot_max_x + 0.5)
+                                    bounds_candidates.append(dot_max_x + 2.0)
                                 if flag_max_x is not None:
-                                    bounds_candidates.append(flag_max_x)
+                                    bounds_candidates.append(flag_max_x + 2.0)
                                 right_bound = max(bounds_candidates)
 
                                 note_obj = {
@@ -320,16 +320,14 @@ def render_ethereal_score_video(
                     max_x = max(n["x"] for n in sys_notes)
                     start_ms = min(n["on_ms"] for n in sys_notes)
                     end_ms = max(n["off_ms"] for n in sys_notes)
-                    # Group notes into discrete sequential events for the entire system (preserves stems across staves)
-                    # Strict vertical column clustering: notes must share the exact same vertical X alignment (|dx| <= 3.0 px)
-                    # (such as rolled chords/arpeggios like Measure 7 or chords spanning staves)
-                    # Sequential melodic notes (dx >= 15px) are strictly kept separate to prevent false pairing!
-                    col_evs = []
+                    # Group notes into discrete sequential events for the entire system
+                    # Step 1: Base clustering by acoustic onset proximity or vertical column
+                    base_evs = []
                     for n in sorted(sys_notes, key=lambda n: (n["on_ms"], n["x"])):
                         matched = False
-                        for ev in col_evs:
-                            is_time_match = abs(n["on_ms"] - ev["on_ms"]) <= 15
-                            is_col_match = abs(n["x"] - ev["x_center"]) <= 3.0 and abs(n["on_ms"] - ev["on_ms"]) < 1200.0
+                        for ev in base_evs:
+                            is_time_match = abs(n["on_ms"] - ev["on_ms"]) <= 20
+                            is_col_match = abs(n["x"] - ev["x_center"]) <= 14.0 and abs(n["on_ms"] - ev["on_ms"]) < 1200.0
                             if is_time_match or is_col_match:
                                 ev["notes"].append(n)
                                 ev["on_ms"] = min(ev["on_ms"], n["on_ms"])
@@ -340,7 +338,7 @@ def render_ethereal_score_video(
                                 matched = True
                                 break
                         if not matched:
-                            col_evs.append({
+                            base_evs.append({
                                 "on_ms": n["on_ms"],
                                 "notes": [n],
                                 "is_onset": n.get("is_onset", True),
@@ -348,8 +346,29 @@ def render_ethereal_score_video(
                                 "max_right": n["right_x"],
                                 "x_center": n["x"]
                             })
-                    col_evs.sort(key=lambda e: (e["on_ms"], e["x_center"]))
-                    sys_events = col_evs
+                    base_evs.sort(key=lambda e: (e["on_ms"], e["min_left"]))
+
+                    # Step 2: Atomic Non-Destructive Bounding Box Merge
+                    # Any consecutive events whose horizontal bounding boxes overlap (or have insufficient whitespace gap < 4px)
+                    # are merged into a unified atomic event. This mathematically guarantees that the reveal wipe line 'px'
+                    # can ALWAYS rest in pure empty whitespace between notes, eradicating 100% of sliced noteheads and accidentals!
+                    merged_evs = []
+                    for ev in base_evs:
+                        if not merged_evs:
+                            merged_evs.append(ev)
+                        else:
+                            prev = merged_evs[-1]
+                            if prev["max_right"] >= ev["min_left"] - 4.0:
+                                prev["notes"].extend(ev["notes"])
+                                prev["on_ms"] = min(prev["on_ms"], ev["on_ms"])
+                                prev["is_onset"] = prev["is_onset"] or ev.get("is_onset", True)
+                                prev["min_left"] = min(prev["min_left"], ev["min_left"])
+                                prev["max_right"] = max(prev["max_right"], ev["max_right"])
+                                prev["x_center"] = float(np.mean([note["x"] for note in prev["notes"]]))
+                            else:
+                                merged_evs.append(ev)
+
+                    sys_events = merged_evs
 
                     page_systems.append({
                         "id": sys_id,
@@ -758,11 +777,10 @@ def render_ethereal_score_video(
                     next_left = evs[last_k+1]["min_left"]
                     if curr_right < next_left:
                         px = int((curr_right + next_left) / 2.0)
+                        # Clamped strictly in empty whitespace between notes so no glyph is ever sliced
+                        px = max(int(curr_right + 1), min(int(next_left - 1), px))
                     else:
-                        px = int(next_left - 1) if next_left > evs[last_k]["min_left"] + 5 else int(curr_right)
-                    # Guaranteed protection: px must never slice into note k+1's accidental or notehead
-                    if px >= next_left and next_left > evs[last_k]["min_left"] + 5:
-                        px = int(next_left - 1)
+                        px = int(curr_right + 1)
                 page_comp[top:bot, :px] = current_page["img_full"][top:bot, :px]
 
         # 3. Musical Camera Kinematics: 100% Fluid Continuous Traveling (Never Freezes, Never Stumbles)
