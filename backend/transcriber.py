@@ -384,10 +384,39 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
                     break
         return notes
 
+    def compress_global_fermata_silences(notes, max_gap_beats=1.5):
+        """
+        Compresses long global pauses (> 1.5 beats across all voices) caused by performer
+        fermatas or phrase-end breaths so they don't spawn completely empty ghost measures.
+        """
+        if not notes:
+            return notes
+        sorted_notes = sorted(notes, key=lambda x: x['onset_beat'])
+        compressed = []
+        cumulative_shift = 0.0
+        current_max_offset = 0.0
+        for i, n in enumerate(sorted_notes):
+            n_copy = dict(n)
+            n_copy['onset_beat'] -= cumulative_shift
+            n_copy['offset_beat'] -= cumulative_shift
+            if i > 0:
+                silence = n_copy['onset_beat'] - current_max_offset
+                if silence > max_gap_beats:
+                    excess = silence - max_gap_beats
+                    excess_snapped = round(excess)
+                    if excess_snapped >= 1.0:
+                        cumulative_shift += excess_snapped
+                        n_copy['onset_beat'] -= excess_snapped
+                        n_copy['offset_beat'] -= excess_snapped
+                        print(f"[Fermata Compressor] Compressed pause of {silence:.2f} beats by {excess_snapped} beats at beat {current_max_offset:.2f}")
+            compressed.append(n_copy)
+            current_max_offset = max(current_max_offset, n_copy['offset_beat'])
+        return compressed
+
     cleaned_treble = clean_hand_rests(treble_notes)
     cleaned_bass = clean_hand_rests(bass_notes)
     
-    all_cleaned = cleaned_treble + cleaned_bass
+    all_cleaned = compress_global_fermata_silences(cleaned_treble + cleaned_bass, max_gap_beats=1.5)
     
     # Convert back to seconds at 120 BPM base (which is what we write in the MIDI file for music21 to parse)
     # Since music21 parses the MIDI assuming 120 BPM, 1 beat = 0.5 seconds.
@@ -495,6 +524,13 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
             elif isinstance(element, chord.Chord):
                 treble_pitches = [p for p in element.pitches if p.midi >= current_split]
                 bass_pitches = [p for p in element.pitches if p.midi < current_split]
+                
+                # Grand Staff Balancing: if bass is empty and chord has >= 3 notes with lowest pitch <= 65 (F4 or lower)
+                if not bass_pitches and len(element.pitches) >= 3:
+                    sorted_pitches = sorted(element.pitches, key=lambda x: x.midi)
+                    if sorted_pitches[0].midi <= 65:
+                        bass_pitches = [sorted_pitches[0]]
+                        treble_pitches = sorted_pitches[1:]
                 
                 if treble_pitches:
                     n_dur = copy.deepcopy(element.duration)
@@ -754,7 +790,7 @@ def apply_diatonic_enharmonics(score_or_stream, key_obj):
     
     if key_obj.sharps < 0: # Flat keys (F, Bb, Eb, Ab, Db, Gm, Cm, Fm, etc.)
         accidentals = {
-            1: 'D-', # Db
+            1: 'C#' if key_obj.mode == 'minor' and key_obj.tonic.name == 'G' else 'D-', # C# in G minor (leading tone to D)
             3: 'E-', # Eb
             4: 'E',
             6: 'F#' if key_obj.mode == 'minor' and key_obj.tonic.name in ('G', 'C') else 'G-',
@@ -781,8 +817,12 @@ def apply_diatonic_enharmonics(score_or_stream, key_obj):
                 el.pitch = respell_pitch(el.pitch, target)
         elif isinstance(el, music21.chord.Chord):
             new_pitches = []
+            chord_pcs = {p.pitchClass for p in el.pitches}
             for p in el.pitches:
                 target = preferred_map.get(p.pitchClass)
+                # If pitch class 1 (C#/Db) is part of an A chord or diminished 7th chord with E (4), G (7), Bb (10)
+                if p.pitchClass == 1 and (9 in chord_pcs or 10 in chord_pcs or 4 in chord_pcs):
+                    target = 'C#'
                 if target and p.name != target:
                     new_pitches.append(respell_pitch(p, target))
                 else:
@@ -814,6 +854,32 @@ def sanitize_tuplets(score_or_stream, allow_triplets=True):
                 curr_ql = Fraction(str(round(float(el.duration.quarterLength), 4)))
                 closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
                 el.duration = music21.duration.Duration(closest)
+
+def merge_intra_measure_ties(score):
+    """
+    Merges notes that are tied to each other inside the same measure on the exact same pitch,
+    turning them into a single clean note with the combined duration and removing redundant ties.
+    """
+    for p in score.parts:
+        for m in p.getElementsByClass('Measure'):
+            streams = [m] + list(m.voices)
+            for st in streams:
+                elements = list(st.notes)
+                to_remove = []
+                for i in range(len(elements) - 1):
+                    el1 = elements[i]
+                    el2 = elements[i+1]
+                    if el1.tie and el1.tie.type == 'start' and el2.tie and el2.tie.type in ('stop', 'continue'):
+                        p1 = [p.nameWithOctave for p in el1.pitches] if el1.isChord else [el1.pitch.nameWithOctave]
+                        p2 = [p.nameWithOctave for p in el2.pitches] if el2.isChord else [el2.pitch.nameWithOctave]
+                        if p1 == p2:
+                            combined_ql = el1.duration.quarterLength + el2.duration.quarterLength
+                            el1.duration = music21.duration.Duration(combined_ql)
+                            el1.tie = el2.tie if el2.tie.type == 'continue' else None
+                            to_remove.append(el2)
+                for dead_el in to_remove:
+                    if dead_el in st:
+                        st.remove(dead_el)
 
 def quantize_and_export(
     raw_midi_path: str,
@@ -878,6 +944,10 @@ def quantize_and_export(
     
     print("Making well-formed notation with measures and ties...")
     split_score.makeNotation(inPlace=True)
+    
+    # Merge redundant intra-measure ties
+    print("Merging redundant intra-measure ties...")
+    merge_intra_measure_ties(split_score)
     
     # Clean up any residual tuplets created by makeNotation
     sanitize_tuplets(split_score, allow_triplets=allow_triplets)
