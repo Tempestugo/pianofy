@@ -45,8 +45,19 @@ def estimate_bpm_and_meter(note_events):
     peak_ioi = (bin_edges[best_bin] + bin_edges[best_bin+1]) / 2.0
     
     bpm = 60.0 / peak_ioi
-    # Normalize to standard 75-150 range
-    while bpm < 75.0:
+    
+    # Check note density
+    total_dur = max(1.0, onsets[-1] - onsets[0])
+    note_density = len(note_events) / total_dur
+    
+    # If density is low (< 3.2 notes/s) and bpm > 110, the peak IOI was likely eighth notes,
+    # not the quarter note beat unit (e.g. Chopin Ballade Largo/Moderato accompaniment)
+    if note_density < 3.2 and bpm > 110.0:
+        bpm /= 2.0
+        
+    # Allow slow tempos down to 45 BPM if density is low (< 3.5 notes/s)
+    min_bpm = 45.0 if note_density < 3.5 else 70.0
+    while bpm < min_bpm:
         bpm *= 2.0
     while bpm > 150.0:
         bpm /= 2.0
@@ -161,10 +172,43 @@ def filter_finger_slips(note_events):
         kept.append(note_ev)
     return kept
 
-def apply_pedal_to_durations(note_events, pedal_events):
+def filter_sympathetic_harmonics(note_events):
+    """
+    Filters out ghost notes caused by acoustic piano sympathetic resonance.
+    When a loud bass note is struck (MIDI < 48, velocity >= 60), faint notes
+    (velocity < 45, velocity diff >= 20) that appear at harmonic intervals
+    (+12, +19, +24, +28 semitones) within 80ms of the bass note onset are pruned.
+    """
+    if len(note_events) < 2:
+        return note_events
+        
+    sorted_notes = sorted(note_events, key=lambda x: x['onset_time'])
+    harmonic_intervals = {12, 19, 24, 28} # Octave, 12th, 2 octaves, 2 octaves + maj 3rd
+    pruned_indices = set()
+    
+    for i, bass in enumerate(sorted_notes):
+        if bass['midi_note'] < 48 and bass['velocity'] >= 60:
+            b_onset = bass['onset_time']
+            for j in range(i + 1, min(i + 20, len(sorted_notes))):
+                candidate = sorted_notes[j]
+                if candidate['onset_time'] - b_onset > 0.080:
+                    break
+                    
+                interval = candidate['midi_note'] - bass['midi_note']
+                if interval in harmonic_intervals:
+                    if candidate['velocity'] < 45 and (bass['velocity'] - candidate['velocity']) >= 20:
+                        pruned_indices.add(j)
+                        print(f"[Ghost Filter] Pruned sympathetic ghost note MIDI {candidate['midi_note']} (+{interval} st) at {candidate['onset_time']:.2f}s")
+                        
+    if pruned_indices:
+        print(f"[Ghost Filter] Removed {len(pruned_indices)} sympathetic harmonic ghost notes.")
+    return [n for idx, n in enumerate(sorted_notes) if idx not in pruned_indices]
+
+def apply_pedal_to_durations(note_events, pedal_events, max_pedal_extension: float = 0.35):
     """
     Extends note offset_time if the sustain pedal is held down when the note ends.
-    The note is sustained until the pedal is released or the exact same pitch is played again.
+    Capped at max_pedal_extension (default 0.35s) to avoid unreadable cross-measure tied notes,
+    while still smoothing legato lines and acoustic resonance.
     """
     if not pedal_events or not note_events:
         return note_events
@@ -183,14 +227,14 @@ def apply_pedal_to_durations(note_events, pedal_events):
                 break
                 
         if active_pedal_release:
-            next_onset = active_pedal_release
+            next_onset = min(active_pedal_release, offset + max_pedal_extension)
             for j in range(i + 1, len(notes)):
                 next_note = notes[j]
                 if next_note['onset_time'] > active_pedal_release:
                     break
                 if next_note['midi_note'] == pitch:
                     # Same pitch played again, cut the sustain here
-                    next_onset = next_note['onset_time']
+                    next_onset = min(next_onset, next_note['onset_time'])
                     break
             
             # Extend duration without exceeding the pedal release time or next identical note
@@ -208,6 +252,11 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
         return []
         
     if beat_times_sec is not None and len(beat_times_sec) >= 2:
+        avg_ioi = np.mean(np.diff(beat_times_sec))
+        librosa_bpm = 60.0 / max(0.01, avg_ioi)
+        # If detected bpm is slow (< 85 BPM) but librosa tracked eighth notes (> 115 BPM), downsample to beat unit
+        if bpm < 85.0 and librosa_bpm > 115.0:
+            beat_times_sec = beat_times_sec[::2]
         beat_indices = np.arange(len(beat_times_sec))
         def get_beat(t):
             if t <= beat_times_sec[0]:
@@ -255,9 +304,35 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
             'velocity': n['velocity']
         })
         
-    # Group by hand (Treble vs Bass) to avoid merging across hands
-    treble_notes = [n for n in beat_notes if n['midi_note'] >= 60]
-    bass_notes = [n for n in beat_notes if n['midi_note'] < 60]
+    def unify_chord_onsets(notes, window_beats=0.10):
+        if not notes:
+            return notes
+        notes = sorted(notes, key=lambda x: x['onset_beat'])
+        clusters = []
+        curr_cluster = [notes[0]]
+        for i in range(1, len(notes)):
+            n = notes[i]
+            if n['onset_beat'] - curr_cluster[0]['onset_beat'] <= window_beats:
+                curr_cluster.append(n)
+            else:
+                clusters.append(curr_cluster)
+                curr_cluster = [n]
+        if curr_cluster:
+            clusters.append(curr_cluster)
+            
+        unified = []
+        for c in clusters:
+            target_onset = c[0]['onset_beat']
+            for n in c:
+                diff = n['onset_beat'] - target_onset
+                n['onset_beat'] = target_onset
+                n['offset_beat'] -= diff
+                unified.append(n)
+        return unified
+
+    # Group by hand (Treble vs Bass) to avoid merging across hands and unify micro-arpeggios into chords
+    treble_notes = unify_chord_onsets([n for n in beat_notes if n['midi_note'] >= 60])
+    bass_notes = unify_chord_onsets([n for n in beat_notes if n['midi_note'] < 60])
     
     def clean_hand_rests(notes):
         if not notes:
@@ -273,6 +348,13 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
             for i in range(len(group) - 1):
                 curr_note = group[i]
                 next_note = group[i+1]
+                # If same pitch struck within 0.15 beats (< 120ms), merge stutter/double-trigger
+                if next_note['onset_beat'] - curr_note['onset_beat'] < 0.15:
+                    next_note['onset_beat'] = min(curr_note['onset_beat'], next_note['onset_beat'])
+                    next_note['offset_beat'] = max(curr_note['offset_beat'], next_note['offset_beat'])
+                    next_note['duration_beat'] = next_note['offset_beat'] - next_note['onset_beat']
+                    curr_note['duration_beat'] = 0.0 # mark as merged
+                    continue
                 gap = next_note['onset_beat'] - curr_note['offset_beat']
                 if gap < 0:
                     # Overlap: trim previous note
@@ -282,6 +364,8 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
                     # Small gap: bridge
                     curr_note['offset_beat'] = next_note['onset_beat']
                     curr_note['duration_beat'] = curr_note['offset_beat'] - curr_note['onset_beat']
+                    
+        notes = [n for n in notes if n['duration_beat'] >= 0.05]
 
         # 2. Bridge small silence gaps between consecutive notes of DIFFERENT pitches
         # We do NOT trim overlaps of different pitches (preserving polyphony / chords / sustained melody)
@@ -475,7 +559,14 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
                 next_offset = sorted_offsets[idx+1]
                 gap = next_offset - offset
                 if gap > 0 and new_el.quarterLength > gap:
-                    new_el.duration = duration.Duration(Fraction(round(float(gap) * 12), 12))
+                    standard_lengths = [
+                        Fraction(1, 6), Fraction(1, 4), Fraction(1, 3), Fraction(3, 8),
+                        Fraction(1, 2), Fraction(2, 3), Fraction(3, 4), Fraction(1, 1),
+                        Fraction(3, 2), Fraction(2, 1), Fraction(3, 1), Fraction(4, 1)
+                    ]
+                    valid = [s for s in standard_lengths if s <= gap + 0.02]
+                    chosen_dur = max(valid) if valid else Fraction(1, 4)
+                    new_el.duration = duration.Duration(chosen_dur)
                     
             part.insert(offset, new_el)
 
@@ -533,8 +624,11 @@ def post_process_and_save_midi(
     else:
         clean_note_events = filtered_note_events
         
-    # Apply pedal-to-duration to merge sustained notes
-    clean_note_events = apply_pedal_to_durations(clean_note_events, est_pedal_events)
+    # Filter sympathetic resonance ghost harmonics from acoustic piano bass strikes
+    clean_note_events = filter_sympathetic_harmonics(clean_note_events)
+        
+    # Apply pedal-to-duration to merge sustained notes (capped at 0.35s to prevent excessive ties)
+    clean_note_events = apply_pedal_to_durations(clean_note_events, est_pedal_events, max_pedal_extension=0.35)
     
     # Fetch beat_times_sec if available in output_dict
     beat_times_sec = output_dict.get('beat_times_sec', None)
@@ -636,6 +730,91 @@ def transcribe_audio_to_raw_midi(
     
     return confidence_threshold, min_duration_ms, final_bpm, final_meter, audio_duration
 
+def respell_pitch(p, target_step_acc):
+    """Respells pitch while preserving exact MIDI value and octave."""
+    orig_midi = p.midi
+    for oct_cand in [p.octave, p.octave + 1, p.octave - 1]:
+        try:
+            test_p = music21.pitch.Pitch(f'{target_step_acc}{oct_cand}')
+            if test_p.midi == orig_midi:
+                return test_p
+        except Exception:
+            pass
+    return p
+
+def apply_diatonic_enharmonics(score_or_stream, key_obj):
+    """
+    Applies contextual diatonic enharmonic spelling to all notes and chords
+    based on the analyzed key signature (e.g. Ab and Bb in G minor / Eb major).
+    """
+    if key_obj is None:
+        return
+        
+    scale_pitch_classes = {p.pitchClass: p.name for p in key_obj.pitches}
+    
+    if key_obj.sharps < 0: # Flat keys (F, Bb, Eb, Ab, Db, Gm, Cm, Fm, etc.)
+        accidentals = {
+            1: 'D-', # Db
+            3: 'E-', # Eb
+            4: 'E',
+            6: 'F#' if key_obj.mode == 'minor' and key_obj.tonic.name in ('G', 'C') else 'G-',
+            8: 'A-', # Ab
+            10: 'B-', # Bb
+            11: 'B' if key_obj.mode == 'minor' else 'C-'
+        }
+    else: # Sharp keys or C major
+        accidentals = {
+            1: 'C#',
+            3: 'D#',
+            6: 'F#',
+            8: 'G#',
+            10: 'B-' if key_obj.sharps == 0 else 'A#'
+        }
+        
+    preferred_map = dict(accidentals)
+    preferred_map.update(scale_pitch_classes)
+    
+    for el in score_or_stream.recurse().notes:
+        if isinstance(el, music21.note.Note):
+            target = preferred_map.get(el.pitch.pitchClass)
+            if target and el.pitch.name != target:
+                el.pitch = respell_pitch(el.pitch, target)
+        elif isinstance(el, music21.chord.Chord):
+            new_pitches = []
+            for p in el.pitches:
+                target = preferred_map.get(p.pitchClass)
+                if target and p.name != target:
+                    new_pitches.append(respell_pitch(p, target))
+                else:
+                    new_pitches.append(p)
+            el.pitches = tuple(new_pitches)
+
+def sanitize_tuplets(score_or_stream, allow_triplets=True):
+    """
+    Sanitizes all tuplets in the score:
+    - Strips irrational micro-tuplets (e.g. 24:23, 24:13, 19:22, 10:7, 5:4)
+    - Snaps note quarterLength to the nearest standard musical fraction
+    - Retains only canonical triplets (3:2 or 6:4) if allow_triplets is True
+    """
+    from fractions import Fraction
+    standard_lengths = [
+        Fraction(1, 6), Fraction(1, 4), Fraction(1, 3), Fraction(3, 8),
+        Fraction(1, 2), Fraction(2, 3), Fraction(3, 4), Fraction(1, 1),
+        Fraction(3, 2), Fraction(2, 1), Fraction(3, 1), Fraction(4, 1)
+    ]
+    for el in score_or_stream.recurse().notes:
+        if el.duration.tuplets:
+            valid_tuplets = []
+            if allow_triplets:
+                for tup in el.duration.tuplets:
+                    if tup.numberNotesActual in (3, 6) and tup.numberNotesNormal in (2, 4):
+                        valid_tuplets.append(tup)
+            
+            if len(valid_tuplets) != len(el.duration.tuplets):
+                curr_ql = Fraction(str(round(float(el.duration.quarterLength), 4)))
+                closest = min(standard_lengths, key=lambda x: abs(x - curr_ql))
+                el.duration = music21.duration.Duration(closest)
+
 def quantize_and_export(
     raw_midi_path: str,
     output_xml_path: str,
@@ -683,12 +862,28 @@ def quantize_and_export(
     # We insert the key signature at offset 0 so it correctly spells the notes
     flat_stream.insert(0, best_key)
     
+    # Sanitize any irrational tuplets at source before splitting
+    sanitize_tuplets(flat_stream, allow_triplets=allow_triplets)
+    
     # Split into Treble and Bass staves (Grand Staff) using the custom split_point
     print(f"Splitting quantized stream with time signature {time_signature}, tempo {bpm} BPM, and split boundary {split_point}...")
     split_score = split_piano_grand_staff(flat_stream, time_signature=time_signature, bpm=bpm, split_point=split_point)
     
+    # Apply contextual enharmonics before making notation
+    print("Applying contextual diatonic enharmonic spelling...")
+    apply_diatonic_enharmonics(split_score, best_key)
+    
+    # Sanitize any irrational tuplets before notation
+    sanitize_tuplets(split_score, allow_triplets=allow_triplets)
+    
     print("Making well-formed notation with measures and ties...")
     split_score.makeNotation(inPlace=True)
+    
+    # Clean up any residual tuplets created by makeNotation
+    sanitize_tuplets(split_score, allow_triplets=allow_triplets)
+    
+    # Final enharmonic pass on split score
+    apply_diatonic_enharmonics(split_score, best_key)
     
     # Export formats
     print(f"Exporting MusicXML to: {output_xml_path}")
