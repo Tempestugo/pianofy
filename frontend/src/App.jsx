@@ -20,7 +20,8 @@ import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay';
 import DynamicEngineV2 from './components/DynamicEngineV2';
 import BlenderRenderView from './components/BlenderRenderView';
 import NativeCinematicRenderView from './components/NativeCinematicRenderView';
-import { Sparkles, Film } from 'lucide-react';
+import DoodleFallingNotes from './components/DoodleFallingNotes';
+import { Sparkles, Film, Palette } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'; // Uses env variable on Vercel, defaults to local
@@ -61,15 +62,32 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [viewMode, setViewMode] = useState('animation'); // 'animation' (OneLine) vs 'pages' (PageFormat)
   const [speedFactor, setSpeedFactor] = useState(1.0);
-  const [activeEngine, setActiveEngine] = useState('classic');
+  const [activeEngine, setActiveEngine] = useState('doodleWaterfall');
   
   const virtualAudioRef = useRef({ currentTime: 0 });
   const audioCtxRef = useRef(null);
   const scheduledNoteIndicesRef = useRef(new Set());
   const playbackStartTimeRef = useRef(0);
   const playbackAnimFrameRef = useRef(null);
-  const notesDataRef = useRef(null);
   const playheadMapRef = useRef([]);
+  const notesDataRef = useRef(null);
+  const [notesData, setNotesData] = useState(null);
+
+  const ensureNotesLoaded = async (id = taskId) => {
+    const targetId = id || taskId;
+    if (!targetId) return;
+    if (notesDataRef.current && notesData) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/tasks/${targetId}/notes`);
+      if (res.ok) {
+        const data = await res.json();
+        notesDataRef.current = data;
+        setNotesData(data);
+      }
+    } catch (e) {
+      console.warn("Could not load notes:", e);
+    }
+  };
   const systemsRef = useRef([]);
   const vfElementsRef = useRef([]);
   const lastDrawnFrameIdRef = useRef(0);
@@ -231,6 +249,7 @@ export default function App() {
             triggerConfetti();
             setTimeout(() => {
               renderScore(taskId || data.task_id);
+              ensureNotesLoaded(taskId || data.task_id);
             }, 100);
           } catch (innerErr) {
             console.warn("Non-fatal error in post-success setup:", innerErr);
@@ -1110,9 +1129,11 @@ export default function App() {
 
       stopPlayback();
       notesDataRef.current = null;
+      setNotesData(null);
       
       // Re-render score
       await renderScore(taskId);
+      ensureNotesLoaded(taskId);
       triggerConfetti();
     } catch (err) {
       console.error(err);
@@ -1172,6 +1193,31 @@ export default function App() {
           </h1>
         </div>
 
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <button
+            onClick={() => setActiveEngine('doodleWaterfall')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '8px 16px',
+              borderRadius: '10px',
+              background: activeEngine === 'doodleWaterfall' 
+                ? 'linear-gradient(135deg, rgba(240,128,119,0.4), rgba(157,139,199,0.4))' 
+                : 'rgba(255,255,255,0.06)',
+              border: '1px solid rgba(240,128,119,0.5)',
+              color: '#fcf7eb',
+              cursor: 'pointer',
+              fontWeight: 600,
+              fontSize: '0.88rem',
+              boxShadow: '0 4px 14px rgba(240,128,119,0.25)',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <Palette size={16} color="#f08077" />
+            🎨 Modo Doodle Falling Notes
+          </button>
+        </div>
       </header>
 
       {/* Main Workspace */}
@@ -1639,53 +1685,21 @@ export default function App() {
       </main>
 
       {/* Sheet Music Visualizer Section */}
-      {taskStatus === 'SUCCESS' && (
+      {(taskStatus === 'SUCCESS' || activeEngine === 'doodleWaterfall') && (
         <section className="glass-container score-section">
           <div className="score-header" style={{ display: 'flex', flexDirection: 'column', gap: '16px', borderBottom: '1px solid rgba(255,255,255,0.08)', paddingBottom: '16px', marginBottom: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
               <div className="score-title">
-                <h2>Partitura Interativa & Animação</h2>
+                <h2>{activeEngine === 'doodleWaterfall' ? '🎨 Modo Doodle Falling Notes' : 'Partitura Interativa & Animação'}</h2>
               </div>
               
-              {/* Animated Player Controls */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                {/* Play / Stop Button */}
-                <button
-                  onClick={startPlayback}
-                  className={`btn-play ${isPlaying ? 'playing' : ''}`}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    padding: '8px 16px',
-                    borderRadius: '8px',
-                    border: 'none',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    fontSize: '0.85rem',
-                    backgroundColor: isPlaying ? 'var(--accent-pink)' : 'var(--accent-cyan)',
-                    color: '#0d0d1e',
-                    transition: 'all 0.2s ease',
-                    boxShadow: '0 0 10px rgba(0, 240, 255, 0.2)'
-                  }}
-                >
-                  {isPlaying ? (
-                    <>
-                      <Square style={{ width: '14px', height: '14px', fill: '#0d0d1e' }} />
-                      Parar Animação
-                    </>
-                  ) : (
-                    <>
-                      <Play style={{ width: '14px', height: '14px', fill: '#0d0d1e' }} />
-                      Iniciar Animação
-                    </>
-                  )}
-                </button>
-
-                {/* Gravar Vídeo / Record Button */}
-                {isRecording ? (
+              {/* Animated Player Controls (for Classic/Dynamic) */}
+              {(activeEngine === 'classic' || activeEngine === 'dynamic') && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                  {/* Play / Stop Button */}
                   <button
-                    onClick={stopRecording}
+                    onClick={startPlayback}
+                    className={`btn-play ${isPlaying ? 'playing' : ''}`}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -1696,72 +1710,105 @@ export default function App() {
                       fontWeight: 600,
                       cursor: 'pointer',
                       fontSize: '0.85rem',
-                      backgroundColor: 'var(--accent-pink)',
-                      color: '#ffffff',
+                      backgroundColor: isPlaying ? 'var(--accent-pink)' : 'var(--accent-cyan)',
+                      color: '#0d0d1e',
                       transition: 'all 0.2s ease',
-                      boxShadow: '0 0 12px rgba(158, 44, 44, 0.4)'
+                      boxShadow: '0 0 10px rgba(0, 240, 255, 0.2)'
                     }}
                   >
-                    <Video style={{ width: '14px', height: '14px', fill: '#ffffff' }} />
-                    Parar Gravação
+                    {isPlaying ? (
+                      <>
+                        <Square style={{ width: '14px', height: '14px', fill: '#0d0d1e' }} />
+                        Parar Animação
+                      </>
+                    ) : (
+                      <>
+                        <Play style={{ width: '14px', height: '14px', fill: '#0d0d1e' }} />
+                        Iniciar Animação
+                      </>
+                    )}
                   </button>
-                ) : (
-                  <button
-                    onClick={startRecording}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      padding: '8px 16px',
-                      borderRadius: '8px',
-                      border: '1px solid rgba(197, 160, 89, 0.3)',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      fontSize: '0.85rem',
-                      backgroundColor: 'rgba(0,0,0,0.3)',
-                      color: 'var(--accent-cyan)',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    <Video style={{ width: '14px', height: '14px' }} />
-                    Gravar Vídeo
-                  </button>
-                )}
 
-                {/* Speed Multiplier Select */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#8c8ca2' }}>
-                  <span>Velocidade:</span>
-                  <select
-                    value={speedFactor}
-                    onChange={(e) => setSpeedFactor(parseFloat(e.target.value))}
-                    style={{
-                      backgroundColor: 'rgba(0,0,0,0.3)',
-                      color: '#ffffff',
-                      border: '1px solid rgba(255,255,255,0.1)',
-                      borderRadius: '6px',
-                      padding: '4px 8px',
-                      cursor: 'pointer',
-                      outline: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    <option value="0.1">0.10x (Ultra Render)</option>
-                    <option value="0.25">0.25x (Super Lento)</option>
-                    <option value="0.5">0.50x (Treinar)</option>
-                    <option value="0.75">0.75x</option>
-                    <option value="1.0">1.0x (Padrão)</option>
-                    <option value="1.25">1.25x</option>
-                    <option value="1.5">1.5x</option>
-                  </select>
+                  {/* Gravar Vídeo / Record Button */}
+                  {isRecording ? (
+                    <button
+                      onClick={stopRecording}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '8px 16px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        backgroundColor: 'var(--accent-pink)',
+                        color: '#ffffff',
+                        transition: 'all 0.2s ease',
+                        boxShadow: '0 0 12px rgba(158, 44, 44, 0.4)'
+                      }}
+                    >
+                      <Video style={{ width: '14px', height: '14px', fill: '#ffffff' }} />
+                      Parar Gravação
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startRecording}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '8px 16px',
+                        borderRadius: '8px',
+                        border: '1px solid rgba(197, 160, 89, 0.3)',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        backgroundColor: 'rgba(0,0,0,0.3)',
+                        color: 'var(--accent-cyan)',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      <Video style={{ width: '14px', height: '14px' }} />
+                      Gravar Vídeo
+                    </button>
+                  )}
+
+                  {/* Speed Multiplier Select */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#8c8ca2' }}>
+                    <span>Velocidade:</span>
+                    <select
+                      value={speedFactor}
+                      onChange={(e) => setSpeedFactor(parseFloat(e.target.value))}
+                      style={{
+                        backgroundColor: 'rgba(0,0,0,0.3)',
+                        color: '#ffffff',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '6px',
+                        padding: '4px 8px',
+                        cursor: 'pointer',
+                        outline: 'none',
+                        fontWeight: 600
+                      }}
+                    >
+                      <option value="0.1">0.10x (Ultra Render)</option>
+                      <option value="0.25">0.25x (Super Lento)</option>
+                      <option value="0.5">0.50x (Treinar)</option>
+                      <option value="0.75">0.75x</option>
+                      <option value="1.0">1.0x (Padrão)</option>
+                      <option value="1.25">1.25x</option>
+                      <option value="1.5">1.5x</option>
+                    </select>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
-            
-
           </div>
           
           <div style={{ display: 'flex', gap: 8, marginBottom: 16, background: 'rgba(15,10,8,0.6)', padding: 6, borderRadius: 12, border: '1px solid rgba(197,160,89,0.15)', flexWrap: 'wrap' }}>
             <EngineToggle active={activeEngine === 'cinematic2d'} onClick={() => setActiveEngine('cinematic2d')} icon={<Film size={15} />} label="Partitura Cinemática (HD)" />
+            <EngineToggle active={activeEngine === 'doodleWaterfall'} onClick={() => { setActiveEngine('doodleWaterfall'); ensureNotesLoaded(); }} icon={<Palette size={15} />} label="🎨 Doodle Falling Notes (Desenho)" />
             <EngineToggle active={activeEngine === 'classic'} onClick={() => setActiveEngine('classic')} icon={<FileMusic size={15} />} label="Motor Clássico" />
             <EngineToggle active={activeEngine === 'dynamic'} onClick={() => setActiveEngine('dynamic')} icon={<Eye size={15} />} label="Partitura Dinâmica" />
             <EngineToggle active={activeEngine === 'blender3d'} onClick={() => setActiveEngine('blender3d')} icon={<Sparkles size={15} />} label="Partitura 3D (Blender)" />
@@ -1771,6 +1818,13 @@ export default function App() {
             <NativeCinematicRenderView taskId={taskId} />
           ) : activeEngine === 'blender3d' ? (
             <BlenderRenderView taskId={taskId} />
+          ) : activeEngine === 'doodleWaterfall' ? (
+            <DoodleFallingNotes 
+              notes={notesData?.notes || notesDataRef.current?.notes || []}
+              bpm={notesData?.bpm || notesDataRef.current?.bpm || bpm || 120}
+              audioDuration={audioDuration}
+              taskId={taskId}
+            />
           ) : (
             <div style={{ position: 'relative', width: '100%', height: '420px', display: hasScoreRendered && !errorMsg ? 'block' : 'none' }}>
               {activeEngine === 'dynamic' && notesDataRef.current && (

@@ -83,6 +83,7 @@ def render_ethereal_score_video(
             print(f"[AudioScoreAligner] Direct alignment success: {align_res}")
             note_intervals = aligner.generate_verovio_aligned_timemap(tk)
             all_onsets = sorted([v[0] for v in note_intervals.values() if v[2]])
+
             max_tstamp_ms = max((v[1] for v in note_intervals.values()), default=10000)
         except Exception as e:
             print(f"[Warning] AudioScoreAligner failed: {e}. Falling back to nominal timemap.")
@@ -107,6 +108,94 @@ def render_ethereal_score_video(
                         note_intervals[nid][1] = max(note_intervals[nid][1], t)
 
     all_onsets.sort()
+
+    # Precompute exact intra-measure and measure-level audio onset times from MEI for all score markings
+    note_to_qs = {}
+    for entry in timemap:
+        qs = entry.get("qstamp")
+        if "on" in entry and qs is not None:
+            for nid in entry["on"]:
+                note_to_qs[nid] = qs
+
+    qs_time_pairs = []
+    for nid, data in note_intervals.items():
+        if nid in note_to_qs:
+            qs_time_pairs.append((note_to_qs[nid], data[0]))
+
+    if qs_time_pairs:
+        unique_qs = sorted(set(p[0] for p in qs_time_pairs))
+        qs_axis = np.array(unique_qs, dtype=np.float64)
+        time_axis = np.array([min(p[1] for p in qs_time_pairs if p[0] == qs) for qs in unique_qs], dtype=np.float64)
+        def qstamp_to_time(qs):
+            return float(np.interp(qs, qs_axis, time_axis))
+    else:
+        def qstamp_to_time(qs):
+            return 0.0
+
+    base_ppq = float(next((el.get("ppq") for el in root_mei.iter() if "ppq" in el.attrib), 480.0))
+    curr_meter_count = 4
+    curr_meter_unit = 4
+    for sdef in root_mei.iter("{http://www.music-encoding.org/ns/mei}scoreDef"):
+        if "meter.count" in sdef.attrib and "meter.unit" in sdef.attrib:
+            try:
+                curr_meter_count = int(sdef.attrib["meter.count"])
+                curr_meter_unit = int(sdef.attrib["meter.unit"])
+                break
+            except ValueError:
+                pass
+
+    curr_qs = 0.0
+    elem_to_time = {}
+
+    for m_el in root_mei.iter("{http://www.music-encoding.org/ns/mei}measure"):
+        for sdef in m_el.iter("{http://www.music-encoding.org/ns/mei}scoreDef"):
+            if "meter.count" in sdef.attrib:
+                try: curr_meter_count = int(sdef.attrib["meter.count"])
+                except ValueError: pass
+            if "meter.unit" in sdef.attrib:
+                try: curr_meter_unit = int(sdef.attrib["meter.unit"])
+                except ValueError: pass
+        for msig in m_el.iter("{http://www.music-encoding.org/ns/mei}meterSig"):
+            if "count" in msig.attrib:
+                try: curr_meter_count = int(msig.attrib["count"])
+                except ValueError: pass
+            if "unit" in msig.attrib:
+                try: curr_meter_unit = int(msig.attrib["unit"])
+                except ValueError: pass
+
+        beat_in_quarters = 4.0 / max(1, curr_meter_unit)
+        layer1 = m_el.find(".//{http://www.music-encoding.org/ns/mei}layer")
+        m_quarters = float(curr_meter_count) * (4.0 / float(curr_meter_unit))
+        if layer1 is not None:
+            ppq_sum = sum(int(c.get("dur.ppq", 0)) for c in layer1.iter() if "dur.ppq" in c.attrib)
+            if ppq_sum > 0:
+                m_quarters = ppq_sum / base_ppq
+
+        m_notes = [n.get("{http://www.w3.org/XML/1998/namespace}id") for n in m_el.iter("{http://www.music-encoding.org/ns/mei}note")]
+        n_times = [note_intervals[nid][0] for nid in m_notes if nid in note_intervals]
+        m_start = min(n_times) if n_times else qstamp_to_time(curr_qs)
+
+        for child in m_el.iter():
+            cid = child.get("{http://www.w3.org/XML/1998/namespace}id")
+            if not cid:
+                continue
+            tstamp_str = child.get("tstamp")
+            if tstamp_str:
+                try:
+                    beat = float(tstamp_str)
+                    m_mark_qs = curr_qs + (beat - 1.0) * beat_in_quarters
+                    mark_time = qstamp_to_time(m_mark_qs)
+                    elem_to_time[cid] = mark_time
+                    for sub in child.iter():
+                        sub_id = sub.get("{http://www.w3.org/XML/1998/namespace}id")
+                        if sub_id:
+                            elem_to_time[sub_id] = mark_time
+                except ValueError:
+                    elem_to_time[cid] = m_start
+            elif cid not in elem_to_time:
+                elem_to_time[cid] = m_start
+
+        curr_qs += m_quarters
 
     total_duration_sec = (max_tstamp_ms / 1000.0) + 2.5
     has_audio = audio_path and os.path.exists(audio_path)
@@ -161,8 +250,9 @@ def render_ethereal_score_video(
       .staff path { stroke: #d0c4b4 !important; }
       .barLine path { stroke: #998a78 !important; }
       text, tspan { fill: #f0eae1 !important; stroke: none !important; }
-      .pgHead, .pgFoot, .footer { display: none !important; }
-      .note, .chord, .beam, .stem, .accid, .flag, .rest, .ledgerLines, .slur, .tie, .dynam, .dir, .ornam, .trill, .turn, .hairpin, .tempo, .mNum { display: none !important; }
+      .pgHead, .pgFoot, .footer, .tempo, .dir, .dynam, .mNum { display: none !important; }
+      .tempo *, .dir *, .dynam *, .mNum * { display: none !important; }
+      .note, .chord, .beam, .stem, .accid, .flag, .rest, .ledgerLines, .slur, .tie, .ornam, .trill, .turn, .hairpin { display: none !important; }
     </style>
     """
 
@@ -215,12 +305,69 @@ def render_ethereal_score_video(
                     margin_x, margin_y = float(m.group(1)), float(m.group(2))
                     break
 
+        # Precompute exact physical boundaries & staff centers for ALL systems present on this page
+        svg_systems = [g for g in root.iter("{http://www.w3.org/2000/svg}g") if g.get("class") == "system"]
+        sys_geom_list = []
+        for g in svg_systems:
+            sys_id = g.get("id")
+            staves_elems = [s for s in g.iter("{http://www.w3.org/2000/svg}g") if "staff" in (s.get("class") or "")]
+            staff_ys = []
+            for s_el in staves_elems:
+                for p in s_el.iter("{http://www.w3.org/2000/svg}path"):
+                    d = p.get("d", "")
+                    for y_val in re.findall(r"M\d+\s+(\d+)", d):
+                        staff_ys.append((margin_y + float(y_val)) * scale_y)
+            staff_min_y = min(staff_ys) if staff_ys else 0.0
+            staff_max_y = max(staff_ys) if staff_ys else float(img_h)
+            staff_center_y = (staff_min_y + staff_max_y) / 2.0
+
+            sys_elem_ys = [staff_min_y, staff_max_y]
+            for elem in g.iter():
+                for k in ("y", "cy"):
+                    if k in elem.attrib:
+                        try: sys_elem_ys.append((margin_y + float(elem.attrib[k])) * scale_y)
+                        except ValueError: pass
+                tr = elem.get("transform", "")
+                m_tr = re.search(r"translate\(\s*[-+]?\d*\.?\d+\s*,\s*([-+]?\d*\.?\d+)\s*\)", tr)
+                if m_tr:
+                    sys_elem_ys.append((margin_y + float(m_tr.group(1))) * scale_y)
+
+            elem_min_y = min(sys_elem_ys)
+            elem_max_y = max(sys_elem_ys)
+            sys_geom_list.append({
+                "id": sys_id,
+                "staff_min_y": staff_min_y,
+                "staff_max_y": staff_max_y,
+                "center_y": staff_center_y,
+                "elem_min_y": elem_min_y,
+                "elem_max_y": elem_max_y
+            })
+
+        sys_bounds_map = {}
+        for s_idx, geom in enumerate(sys_geom_list):
+            if s_idx == 0:
+                top_y = 0
+            else:
+                prev_max = sys_geom_list[s_idx - 1]["elem_max_y"]
+                curr_min = geom["elem_min_y"]
+                top_y = int((prev_max + curr_min) / 2.0) if curr_min > prev_max else int((sys_geom_list[s_idx - 1]["staff_max_y"] + geom["staff_min_y"]) / 2.0)
+            if s_idx == len(sys_geom_list) - 1:
+                bot_y = img_h
+            else:
+                curr_max = geom["elem_max_y"]
+                next_min = sys_geom_list[s_idx + 1]["elem_min_y"]
+                bot_y = int((curr_max + next_min) / 2.0) if next_min > curr_max else int((geom["staff_max_y"] + sys_geom_list[s_idx + 1]["staff_min_y"]) / 2.0)
+            sys_bounds_map[geom["id"]] = (top_y, bot_y, geom["center_y"], geom["staff_min_y"], geom["staff_max_y"])
+
         page_notes = []
         page_systems = []
         for g in root.iter("{http://www.w3.org/2000/svg}g"):
             if g.get("class") == "system":
                 sys_id = g.get("id")
                 measures = [m for m in g.iter("{http://www.w3.org/2000/svg}g") if "measure" in (m.get("class") or "")]
+                top_y, bot_y, staff_center_y, staff_min_y, staff_max_y = sys_bounds_map.get(
+                    sys_id, (0, img_h, 0.0, 0.0, float(img_h))
+                )
                 staves_data = {}
                 sys_notes = []
 
@@ -293,14 +440,14 @@ def render_ethereal_score_video(
                                         is_half = True
 
                                 nh_width = 14.0 if is_half else 11.2
-                                left_bound = (acc_x - 2.0) if acc_x is not None else (nx - 1.0)
-                                bounds_candidates = [nx + nh_width + 1.5]
+                                left_bound = (acc_x - 1.5) if acc_x is not None else (nx - 0.5)
+                                bounds_candidates = [nx + nh_width + 1.0]
                                 if stem_x is not None:
-                                    bounds_candidates.append(stem_x + 2.0)
+                                    bounds_candidates.append(stem_x + 1.5)
                                 if dot_max_x is not None:
-                                    bounds_candidates.append(dot_max_x + 2.0)
+                                    bounds_candidates.append(dot_max_x + 1.5)
                                 if flag_max_x is not None:
-                                    bounds_candidates.append(flag_max_x + 2.0)
+                                    bounds_candidates.append(flag_max_x + 1.5)
                                 right_bound = max(bounds_candidates)
 
                                 note_obj = {
@@ -314,7 +461,8 @@ def render_ethereal_score_video(
                                     "on_ms": note_intervals[nid][0],
                                     "off_ms": note_intervals[nid][1],
                                     "is_onset": note_intervals[nid][2] if len(note_intervals[nid]) > 2 else True,
-                                    "staff": staff_key
+                                    "staff": staff_key,
+                                    "sys": sys_id
                                 }
                                 staves_data[staff_key].append(note_obj)
                                 sys_notes.append(note_obj)
@@ -333,9 +481,9 @@ def render_ethereal_score_video(
                     for n in sorted(sys_notes, key=lambda n: (n["on_ms"], n["x"])):
                         matched = False
                         for ev in base_evs:
-                            is_time_match = abs(n["on_ms"] - ev["on_ms"]) <= 20
-                            is_col_match = abs(n["x"] - ev["x_center"]) <= 14.0 and abs(n["on_ms"] - ev["on_ms"]) < 1200.0
-                            if is_time_match or is_col_match:
+                            is_time_match = abs(n["on_ms"] - ev["on_ms"]) <= 35.0
+                            is_chord_roll = abs(n["x"] - ev["x_center"]) <= 12.0 and abs(n["on_ms"] - ev["on_ms"]) <= 65.0
+                            if is_time_match or is_chord_roll:
                                 ev["notes"].append(n)
                                 ev["on_ms"] = min(ev["on_ms"], n["on_ms"])
                                 ev["is_onset"] = ev["is_onset"] or n.get("is_onset", True)
@@ -356,16 +504,16 @@ def render_ethereal_score_video(
                     base_evs.sort(key=lambda e: (e["on_ms"], e["min_left"]))
 
                     # Step 2: Atomic Non-Destructive Bounding Box Merge
-                    # Any consecutive events whose horizontal bounding boxes overlap (or have insufficient whitespace gap < 4px)
-                    # are merged into a unified atomic event. This mathematically guarantees that the reveal wipe line 'px'
-                    # can ALWAYS rest in pure empty whitespace between notes, eradicating 100% of sliced noteheads and accidentals!
+                    # Only merge if consecutive events strictly overlap horizontally (prev["max_right"] > ev["min_left"]).
+                    # If there is ANY whitespace between them (even 1 pixel), they remain distinct sequential events
+                    # that appear one-by-one with their exact acoustic strike!
                     merged_evs = []
                     for ev in base_evs:
                         if not merged_evs:
                             merged_evs.append(ev)
                         else:
                             prev = merged_evs[-1]
-                            if prev["max_right"] >= ev["min_left"] - 4.0:
+                            if prev["max_right"] > ev["min_left"]:
                                 prev["notes"].extend(ev["notes"])
                                 prev["on_ms"] = min(prev["on_ms"], ev["on_ms"])
                                 prev["is_onset"] = prev["is_onset"] or ev.get("is_onset", True)
@@ -377,6 +525,19 @@ def render_ethereal_score_video(
 
                     sys_events = merged_evs
 
+                    sys_elem_ys = [staff_min_y, staff_max_y]
+                    for elem in g.iter():
+                        for k in ("y", "cy"):
+                            if k in elem.attrib:
+                                try: sys_elem_ys.append((margin_y + float(elem.attrib[k])) * scale_y)
+                                except ValueError: pass
+                        tr = elem.get("transform", "")
+                        m_tr = re.search(r"translate\(\s*[-+]?\d*\.?\d+\s*,\s*([-+]?\d*\.?\d+)\s*\)", tr)
+                        if m_tr:
+                            sys_elem_ys.append((margin_y + float(m_tr.group(1))) * scale_y)
+                    elem_min_y = min(sys_elem_ys)
+                    elem_max_y = max(sys_elem_ys)
+
                     page_systems.append({
                         "id": sys_id,
                         "notes": sys_notes,
@@ -384,21 +545,17 @@ def render_ethereal_score_video(
                         "max_x": max_x,
                         "min_y": min_y,
                         "max_y": max_y,
-                        "top_y": 0,
-                        "bottom_y": img_h,
-                        "center_y": (min_y + max_y) / 2.0,
+                        "elem_min_y": elem_min_y,
+                        "elem_max_y": elem_max_y,
+                        "top_y": top_y,
+                        "bottom_y": bot_y,
+                        "center_y": staff_center_y,
+                        "staff_min_y": staff_min_y,
+                        "staff_max_y": staff_max_y,
                         "start_ms": start_ms,
                         "end_ms": end_ms,
                         "events": sys_events
                     })
-
-        # Compute non-clipping system vertical boundaries so slurs, ties, and markings are never cut
-        num_sys = len(page_systems)
-        for i in range(num_sys):
-            top_y = 0 if i == 0 else int((page_systems[i-1]["max_y"] + page_systems[i]["min_y"]) / 2.0)
-            bot_y = img_h if i == num_sys - 1 else int((page_systems[i]["max_y"] + page_systems[i+1]["min_y"]) / 2.0)
-            page_systems[i]["top_y"] = top_y
-            page_systems[i]["bottom_y"] = bot_y
 
         # Extract markings (slurs, hairpins, dynamics, directions, tempo) with onset times & bounds
         slur_map = {}
@@ -416,26 +573,11 @@ def render_ethereal_score_video(
         page_markings = []
         for g in root.iter("{http://www.w3.org/2000/svg}g"):
             cls = (g.get("class") or "").split()
-            if any(k in cls for k in ("slur", "hairpin", "dynam", "dir", "tempo")):
+            if any(k in cls for k in ("dynam", "dir", "tempo")):
                 gid = g.get("id")
-                start_ms = None
-                if "slur" in cls:
-                    st_id, en_id = slur_map.get(gid, (None, None))
-                    if st_id and st_id in note_intervals:
-                        start_ms = note_intervals[st_id][0]
+                start_ms = elem_to_time.get(gid)
                 if start_ms is None:
-                    curr = g
-                    while curr is not None:
-                        if "measure" in (curr.get("class") or "").split():
-                            m_notes = [n for n in curr.iter("{http://www.w3.org/2000/svg}g") if "note" in (n.get("class") or "").split()]
-                            n_times = [note_intervals[n.get("id")][0] for n in m_notes if n.get("id") in note_intervals]
-                            if n_times:
-                                start_ms = min(n_times)
-                            break
-                        curr = parents.get(curr)
-
-                if start_ms is None:
-                    start_ms = 0.0
+                    continue
 
                 xs, ys = [], []
                 for elem in g.iter():
@@ -444,6 +586,16 @@ def render_ethereal_score_video(
                     if match:
                         xs.append(float(match.group(1)))
                         ys.append(float(match.group(2)))
+                    if "x" in elem.attrib and "y" in elem.attrib:
+                        try:
+                            ex = float(elem.attrib["x"])
+                            ey = float(elem.attrib["y"])
+                            xs.append(ex)
+                            ys.append(ey)
+                            xs.append(ex + 1800.0)
+                            ys.append(ey - 600.0)
+                        except ValueError:
+                            pass
                     d = elem.get("d", "")
                     if d:
                         c = [float(val) for val in re.findall(r"[-+]?\d*\.\d+|\d+", d)]
@@ -524,6 +676,7 @@ def render_ethereal_score_video(
                 "y_from": float(s_curr["center_y"]),
                 "y_to": float(s_next["center_y"])
             })
+        page["sys_transitions"] = sys_transitions
 
         for s_idx, sys_obj in enumerate(systems):
             evs = sys_obj["events"]
@@ -546,7 +699,7 @@ def render_ethereal_score_video(
             if seg_len <= 0:
                 continue
 
-            t_axis = np.linspace(s_t_start, s_t_end, seg_len)
+            t_axis = (np.arange(f_start, f_end, dtype=np.float64) / float(fps)) * 1000.0
 
             ev_times = np.array([e["on_ms"] for e in evs], dtype=np.float64)
             ev_xs = np.array([np.mean([n["x"] for n in e["notes"]]) for e in evs], dtype=np.float64)
@@ -654,7 +807,7 @@ def render_ethereal_score_video(
     screen_target_y = height * 0.50
     y_coords, x_coords = np.mgrid[0:height, 0:width].astype(np.float32)
     dx = (x_coords - screen_target_x) / (width * 0.48)
-    dy = (y_coords - screen_target_y) / (height * 0.52)
+    dy = (y_coords - screen_target_y) / (height * 0.40)
     dist_sq = dx * dx + dy * dy
     spotlight_raw = np.clip(1.0 - (dist_sq ** 1.15), 0.0, 1.0)
     spotlight_score = np.clip(spotlight_raw * 1.55, 0.0, 1.0)[:, :, np.newaxis]
@@ -747,8 +900,20 @@ def render_ethereal_score_video(
             else:
                 playhead_x = float(active_sys["min_x"])
 
+        # Determine set of active/visible systems for current_page at current_time_ms
+        visible_sys_ids = {active_sys["id"]}
+        for tr in current_page.get("sys_transitions", []):
+            if tr["t_start"] - 400.0 <= current_time_ms <= tr["t_end"] + 400.0:
+                visible_sys_ids.add(current_page["systems"][tr["from_idx"]]["id"])
+                visible_sys_ids.add(current_page["systems"][tr["to_idx"]]["id"])
+
         # Progressive discrete note reveal ("picotada nota por nota", full system height preserving all stems)
         page_comp = current_page["img_staves"].copy()
+
+        # Eradicate 100% of inactive systems from page_comp to prevent any vertical bleed across staves
+        for s in current_page["systems"]:
+            if s["id"] not in visible_sys_ids:
+                page_comp[s["top_y"]:s["bottom_y"], :] = 0
 
         # 1. Reveal all active markings in full as soon as their start note / measure arrives
         for m in current_page.get("markings", []):
@@ -760,6 +925,8 @@ def render_ethereal_score_video(
 
         # 2. Progressive discrete note reveal ("picotada nota por nota", full system height preserving all stems)
         for s in current_page["systems"]:
+            if s["id"] not in visible_sys_ids:
+                continue
             top = s["top_y"]
             bot = s["bottom_y"]
             if current_time_ms >= s["end_ms"]:
@@ -877,6 +1044,8 @@ def render_ethereal_score_video(
 
         # Draw pure white luminous flash on onset & persistent semi-illumination on played notes
         for n in illuminated_notes:
+            if n.get("sys") and n["sys"] not in visible_sys_ids:
+                continue
             dt = current_time_ms - n["on_ms"]
             is_sustaining = (current_time_ms <= n["off_ms"])
 

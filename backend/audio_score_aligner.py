@@ -9,6 +9,129 @@ import xml.etree.ElementTree as ET
 import librosa
 
 
+try:
+    import numba
+    @numba.njit(fastmath=True)
+    def _fast_prefix_dtw_jit(C):
+        n_score, n_audio = C.shape
+        D = np.full((n_score, n_audio), np.inf, dtype=np.float32)
+        parent = np.zeros((n_score, n_audio, 2), dtype=np.int32)
+        
+        D[0, 0] = C[0, 0]
+        for i in range(1, n_score):
+            D[i, 0] = D[i-1, 0] + C[i, 0]
+            parent[i, 0, 0] = i - 1
+            parent[i, 0, 1] = 0
+        for j in range(1, n_audio):
+            D[0, j] = D[0, j-1] + C[0, j]
+            parent[0, j, 0] = 0
+            parent[0, j, 1] = j - 1
+            
+        for i in range(1, n_score):
+            for j in range(1, n_audio):
+                v_diag = D[i-1, j-1]
+                v_left = D[i, j-1]
+                v_up = D[i-1, j]
+                if v_diag <= v_left and v_diag <= v_up:
+                    D[i, j] = v_diag + C[i, j]
+                    parent[i, j, 0] = i - 1
+                    parent[i, j, 1] = j - 1
+                elif v_left <= v_up:
+                    D[i, j] = v_left + C[i, j]
+                    parent[i, j, 0] = i
+                    parent[i, j, 1] = j - 1
+                else:
+                    D[i, j] = v_up + C[i, j]
+                    parent[i, j, 0] = i - 1
+                    parent[i, j, 1] = j
+
+        best_score_f = 0
+        min_cost = D[0, n_audio - 1]
+        for i in range(1, n_score):
+            if D[i, n_audio - 1] < min_cost:
+                min_cost = D[i, n_audio - 1]
+                best_score_f = i
+                
+        curr_i = best_score_f
+        curr_j = n_audio - 1
+        max_len = n_score + n_audio
+        path_rev = np.zeros((max_len, 2), dtype=np.int32)
+        idx = 0
+        while curr_i >= 0 and curr_j >= 0:
+            path_rev[idx, 0] = curr_i
+            path_rev[idx, 1] = curr_j
+            idx += 1
+            if curr_i == 0 and curr_j == 0:
+                break
+            pi = parent[curr_i, curr_j, 0]
+            pj = parent[curr_i, curr_j, 1]
+            if pi == curr_i and pj == curr_j:
+                break
+            curr_i = pi
+            curr_j = pj
+            
+        path = np.zeros((idx, 2), dtype=np.int32)
+        for k in range(idx):
+            path[k, 0] = path_rev[idx - 1 - k, 0]
+            path[k, 1] = path_rev[idx - 1 - k, 1]
+        return path
+except Exception:
+    _fast_prefix_dtw_jit = None
+
+def compute_prefix_dtw(C: np.ndarray) -> np.ndarray:
+    """
+    Computes Prefix DTW with fixed start at (score=0, audio=0) and open end on score
+    at the final audio frame. Prevents skipping the start of the piece while allowing
+    the audio to end anywhere in the score.
+    """
+    if _fast_prefix_dtw_jit is not None:
+        try:
+            return _fast_prefix_dtw_jit(np.ascontiguousarray(C, dtype=np.float32))
+        except Exception:
+            pass
+
+    n_score, n_audio = C.shape
+    D = np.full((n_score, n_audio), np.inf, dtype=np.float32)
+    parent = np.zeros((n_score, n_audio, 2), dtype=np.int32)
+
+    D[0, 0] = C[0, 0]
+    for i in range(1, n_score):
+        D[i, 0] = D[i-1, 0] + C[i, 0]
+        parent[i, 0] = (i-1, 0)
+    for j in range(1, n_audio):
+        D[0, j] = D[0, j-1] + C[0, j]
+        parent[0, j] = (0, j-1)
+
+    for i in range(1, n_score):
+        for j in range(1, n_audio):
+            v_diag = D[i-1, j-1]
+            v_left = D[i, j-1]
+            v_up = D[i-1, j]
+            if v_diag <= v_left and v_diag <= v_up:
+                D[i, j] = v_diag + C[i, j]
+                parent[i, j] = (i-1, j-1)
+            elif v_left <= v_up:
+                D[i, j] = v_left + C[i, j]
+                parent[i, j] = (i, j-1)
+            else:
+                D[i, j] = v_up + C[i, j]
+                parent[i, j] = (i-1, j)
+
+    best_end_score_f = int(np.argmin(D[:, n_audio - 1]))
+    path = []
+    curr_i = best_end_score_f
+    curr_j = n_audio - 1
+    while curr_i >= 0 and curr_j >= 0:
+        path.append((curr_i, curr_j))
+        if curr_i == 0 and curr_j == 0:
+            break
+        pi, pj = parent[curr_i, curr_j]
+        if pi == curr_i and pj == curr_j:
+            break
+        curr_i, curr_j = pi, pj
+
+    return np.array(path[::-1], dtype=np.int32)
+
 class AudioScoreAligner:
     """
     State-of-the-Art Audio-to-Score Alignment Engine.
@@ -173,7 +296,12 @@ class AudioScoreAligner:
 
         # 4. Load & Synthesize Score Timeline from MusicXML
         if not self.score_events:
-            self.load_score_events(max_measures=max_measures)
+            eff_max_measures = max_measures
+            if eff_max_measures is None and max_duration_sec is not None:
+                # In classical piano, a measure is at least 1.0 second even at fast tempos
+                # For 15s -> ~21 measures cap; for 60s -> ~66 measures cap
+                eff_max_measures = int(np.ceil(float(max_duration_sec) / 1.0)) + 6
+            self.load_score_events(max_measures=eff_max_measures)
 
         is_chopin_ballade = "chopin_ballade" in self.musicxml_path.lower()
         if is_chopin_ballade:
@@ -234,8 +362,9 @@ class AudioScoreAligner:
         cost_chroma = 1.0 - np.dot(chroma_score_norm.T, chroma_audio_norm)
         combined_cost = 0.5 * cost_cqt + 0.5 * cost_chroma
 
-        D, wp = librosa.sequence.dtw(C=combined_cost, subseq=False)
-        wp = wp[::-1]
+        # Prefix DTW: Fixed start at (score=0, audio=0), Open End on Score at final audio frame
+        # Prevents skipping the start of the piece while allowing arbitrary audio duration
+        wp = compute_prefix_dtw(combined_cost)
         self.alignment_path = wp
 
         # 6. Map Score Offsets with Physical Pitch-Aware Spectral Snapping
@@ -252,6 +381,8 @@ class AudioScoreAligner:
 
         warp_offs = []
         warp_secs = []
+        max_aligned_score_f = int(wp[:, 0].max())
+        max_aligned_audio_f = float(wp[wp[:, 0] == max_aligned_score_f, 1].max())
 
         for idx, item in enumerate(note_timeline):
             off = item['event']['offset']
@@ -260,12 +391,19 @@ class AudioScoreAligner:
             pitches = item['event']['pitches']
             m = item['event']['measure']
             
-            matches = wp[wp[:, 0] == score_f]
-            matched_audio_f = np.median(matches[:, 1]) if len(matches) > 0 else np.interp(score_f, wp[:, 0], wp[:, 1])
-            raw_dtw_sec = float((matched_audio_f + first_sound_frame) * score_hop)
+            if score_f > max_aligned_score_f:
+                # Monotonically extrapolate past the end of audio with nominal tempo
+                extra_score_sec = (score_f - max_aligned_score_f) * score_hop
+                raw_dtw_sec = float((max_aligned_audio_f + first_sound_frame) * score_hop) + extra_score_sec
+            else:
+                matches = wp[wp[:, 0] == score_f]
+                matched_audio_f = np.median(matches[:, 1]) if len(matches) > 0 else np.interp(score_f, wp[:, 0], wp[:, 1])
+                raw_dtw_sec = float((matched_audio_f + first_sound_frame) * score_hop)
 
             if off == first_score_offset:
                 real_sec = first_sound_time
+            elif raw_dtw_sec >= audio_dur:
+                real_sec = raw_dtw_sec
             else:
                 is_first_of_repeated = (m == 5 and idx < len(note_timeline) - 1 and pitches == note_timeline[idx+1]['event']['pitches'])
 

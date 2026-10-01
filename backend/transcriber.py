@@ -346,11 +346,12 @@ def apply_pedal_to_durations(note_events, pedal_events, max_pedal_extension: flo
             
     return notes
 
-def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signature="4/4", beat_times_sec=None):
+def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signature="4/4", beat_times_sec=None, downbeat_times_sec=None):
     """
     Quantizes note onsets and durations in beat-space and fills small silence gaps
     to prevent random loose rests and cluttered voice layouts.
     Uses 1/12 beat resolution if triplets are enabled or time signature is 6/8.
+    If downbeat_times_sec is provided (e.g. from BeatNet), maps notes to dynamic measure barlines.
     """
     if not note_events:
         return []
@@ -360,8 +361,32 @@ def quantize_and_clean_events(note_events, bpm, allow_triplets=False, time_signa
             bpm = float(bpm)
         except ValueError:
             bpm = 120.0
-        
-    if beat_times_sec is not None and len(beat_times_sec) >= 2:
+            
+    if downbeat_times_sec is not None and len(downbeat_times_sec) >= 2:
+        dbs = list(downbeat_times_sec)
+        if time_signature == "3/4":
+            K = 3.0
+        elif time_signature == "6/8":
+            K = 6.0
+        elif time_signature == "2/4":
+            K = 2.0
+        else:
+            K = 4.0
+            
+        def get_beat(t):
+            for i, db in enumerate(dbs):
+                if abs(t - db) <= 0.15:
+                    return float(i * K)
+            if t < dbs[0]:
+                bar_len = max(0.5, dbs[1] - dbs[0]) if len(dbs) > 1 else (60.0 / bpm * K)
+                return max(0.0, (t - (dbs[0] - bar_len)) / bar_len) * K
+            for i in range(len(dbs) - 1):
+                if dbs[i] <= t < dbs[i+1]:
+                    bar_len = max(0.1, dbs[i+1] - dbs[i])
+                    return i * K + ((t - dbs[i]) / bar_len) * K
+            bar_len = max(0.5, dbs[-1] - dbs[-2]) if len(dbs) > 1 else (60.0 / bpm * K)
+            return (len(dbs) - 1) * K + ((t - dbs[-1]) / bar_len) * K
+    elif beat_times_sec is not None and len(beat_times_sec) >= 2:
         avg_ioi = np.mean(np.diff(beat_times_sec))
         librosa_bpm = 60.0 / max(0.01, avg_ioi)
         # Check if librosa tracked eighth-note subdivisions (~2x detected BPM)
@@ -774,6 +799,25 @@ def split_piano_grand_staff(flat_stream, time_signature=None, bpm=120, split_poi
 
     remove_polyphonic_overlaps(right_hand)
     remove_polyphonic_overlaps(left_hand)
+
+    # Equalize staff durations so both hands have measures across the entire score
+    max_time = max(right_hand.highestTime, left_hand.highestTime)
+    bar_dur = 4.0
+    if time_signature:
+        try:
+            ts = meter.TimeSignature(time_signature)
+            bar_dur = float(ts.barDuration.quarterLength)
+        except Exception:
+            pass
+    num_bars = int(np.ceil(float(max_time) / max(0.1, bar_dur)))
+    for b in range(num_bars):
+        b_start = b * bar_dur
+        has_lh = any(b_start <= el.offset < b_start + bar_dur for el in left_hand.elements if isinstance(el, (note.Note, chord.Chord)))
+        if not has_lh:
+            left_hand.insert(b_start, note.Rest(quarterLength=bar_dur))
+        has_rh = any(b_start <= el.offset < b_start + bar_dur for el in right_hand.elements if isinstance(el, (note.Note, chord.Chord)))
+        if not has_rh:
+            right_hand.insert(b_start, note.Rest(quarterLength=bar_dur))
     
     score.insert(0, right_hand)
     score.insert(0, left_hand)
@@ -851,13 +895,15 @@ def post_process_and_save_midi(
     # Re-apply trim after pedal extension to guarantee zero chord collisions
     clean_note_events = trim_melodic_step_overlaps(clean_note_events)
     
-    # Fetch beat_times_sec if available in output_dict
+    # Fetch beat_times_sec and downbeat_times_sec if available in output_dict
     beat_times_sec = output_dict.get('beat_times_sec', None)
+    downbeat_times_sec = output_dict.get('downbeat_times_sec', None)
     
     # Pre-quantize and clean up legato overlaps and small silence gaps
     cleaned_note_events = quantize_and_clean_events(
         clean_note_events, bpm, allow_triplets=allow_triplets, 
-        time_signature=time_signature, beat_times_sec=beat_times_sec
+        time_signature=time_signature, beat_times_sec=beat_times_sec,
+        downbeat_times_sec=downbeat_times_sec
     )
     
     # Pedal events scaling
@@ -902,7 +948,8 @@ def transcribe_audio_to_raw_midi(
     
     # Load audio
     print(f"Loading audio from {audio_path}...")
-    audio, _ = load_audio(audio_path, sr=sample_rate, mono=True)
+    import librosa
+    audio, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
     audio_duration = float(len(audio)) / sample_rate
     
     # Run transcription
@@ -917,10 +964,6 @@ def transcribe_audio_to_raw_midi(
     if len(beat_times_sec) >= 2:
         output_dict['beat_times_sec'] = beat_times_sec
     
-    # Save raw activations (sigmoids) to compressed NPZ file
-    print(f"Saving neural activations to {output_dict_path}...")
-    np.savez_compressed(output_dict_path, **output_dict)
-    
     # Get estimated note and pedal lists (default model threshold)
     est_note_events = transcribed_dict.get('est_note_events', [])
     
@@ -931,6 +974,27 @@ def transcribe_audio_to_raw_midi(
     # Resolve values (auto vs manual)
     final_bpm = detected_bpm if bpm == "auto" else float(bpm)
     final_meter = detected_meter if time_signature == "auto" else time_signature
+    
+    # Run BeatNet Neural Downbeat Tracking
+    print("Running BeatNet Neural Downbeat Tracking...")
+    try:
+        import json
+        from backend.beatnet.beatnet_lite import BeatNetLite
+        beats_per_bar = 3 if final_meter == "3/4" else 4
+        bn = BeatNetLite(model=1, beats_per_bar=[beats_per_bar], min_bpm=40.0, max_bpm=160.0)
+        audio_22k = librosa.resample(audio, orig_sr=sample_rate, target_sr=22050)
+        grid = json.loads(bn.process(audio_22k))
+        bn_events = sorted([(float(t), int(b)) for t, b in grid.items()], key=lambda x: x[0])
+        downbeat_times = [t for t, b in bn_events if b == 1]
+        if len(downbeat_times) >= 2:
+            output_dict['downbeat_times_sec'] = downbeat_times
+            print(f"[BeatNet] Detected {len(downbeat_times)} dynamic downbeats.")
+    except Exception as e:
+        print(f"[BeatNet] Notice: BeatNet tracking fallback: {e}")
+
+    # Save raw activations (sigmoids) to compressed NPZ file
+    print(f"Saving neural activations to {output_dict_path}...")
+    np.savez_compressed(output_dict_path, **output_dict)
     
     # Calibrate thresholds if auto-calibrate is True
     if auto_calibrate:

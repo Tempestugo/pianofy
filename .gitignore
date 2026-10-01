@@ -10,4 +10,9 @@ backend/outputs/
 *.mp3
 *.wav
 *.mp4
-desktop.ini
+desktop.ini
+scratch/
+*.npz
+chopin_ballade_1.*
+chopin_p1_preview.png
+notes_only_mask.png
